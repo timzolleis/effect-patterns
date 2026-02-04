@@ -63,37 +63,22 @@ mkdir -p "$PATTERNS_DIR"
 # Extract variables as JSON for handlebars
 VARIABLES=$(jq '.variables' "$CONFIG")
 
-# Check if handlebars is available (local, global, or via dlx/npx)
+# Check if handlebars is available locally or globally
 check_handlebars() {
-  # Check local node_modules
   if [ -d "node_modules/handlebars" ]; then
     return 0
   fi
-  # Check if globally available to node
   if node -e "require('handlebars')" 2>/dev/null; then
     return 0
   fi
   return 1
 }
 
-# Install handlebars temporarily if not available
+# Install handlebars to temp directory if not available
 if ! check_handlebars; then
-  echo "Installing handlebars..."
-  case "$PKG_MANAGER" in
-    bun)
-      bun add -d handlebars --silent
-      ;;
-    pnpm)
-      pnpm add -D handlebars --silent
-      ;;
-    yarn)
-      yarn add -D handlebars --silent
-      ;;
-    npm)
-      npm install -D handlebars --silent
-      ;;
-  esac
-  INSTALLED_HANDLEBARS=true
+  echo "Installing handlebars (temporary)..."
+  npm install --prefix "$TEMP_DIR" handlebars --silent 2>/dev/null
+  export NODE_PATH="$TEMP_DIR/node_modules"
 fi
 
 # Function to process a template
