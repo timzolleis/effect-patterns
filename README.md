@@ -31,9 +31,13 @@ The agent will auto-detect your project structure, create the config, and run th
 
 ### Install Claude Code Skills (Optional)
 
-Clone this repo and run:
 ```bash
-./scripts/install-skills.sh
+curl -fsSL https://raw.githubusercontent.com/timzolleis/effect-patterns/main/scripts/install-skills.sh | bash
+```
+
+Or with a specific ref:
+```bash
+curl -fsSL https://raw.githubusercontent.com/timzolleis/effect-patterns/main/scripts/install-skills.sh | bash -s -- github:timzolleis/effect-patterns v1.0.0
 ```
 
 Skills are installed to `~/.claude/skills/` and include:
