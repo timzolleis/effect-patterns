@@ -1,0 +1,558 @@
+# HTTP API Pattern
+
+## Overview
+
+HTTP APIs are defined declaratively using Effect's `@effect/platform` HTTP API system. APIs consist of schemas, router definitions, and handler implementations with proper error mapping. This pattern is for NEW API endpoints - existing tRPC routers remain unchanged.
+
+## File Structure Convention
+
+Every API group uses two files:
+
+### `[domain]-api-group.ts` - Declarative Definition
+
+Contains the API structure without implementation:
+
+- Request/response schemas (`Schema.Class`)
+- HTTP error imports
+- Endpoint definitions with `.setPath()`, `.setPayload()`, `.addSuccess()`, `.addError()`
+- Middleware chain (`.middleware()`)
+- Group prefix (`.prefix()`)
+
+### `[domain]-api-group.server.ts` - Handler Implementation
+
+Contains the actual handler logic:
+
+- `[Domain]ApiGroupLayer` - Handlers WITHOUT dependencies (for testing)
+- `[Domain]ApiGroupLive` - Handlers WITH production dependencies
+- Dependency injection via `yield*` at start of `Effect.fnUntraced`
+- `Effect.withSpan()` on every handler
+- `Effect.catchTag()` or `Effect.catchTags()` for error mapping
+
+This split enables:
+1. **Type-safe client generation** - Import only the definition file
+2. **Testability** - Provide test dependencies to `[Domain]ApiGroupLayer`
+3. **Tree-shaking** - Server code stays out of client bundles
+
+## Principles
+
+- **Declarative API structure** - Define endpoints with schemas separate from implementation
+- **Type-safe schemas** - Use `Schema.Class` for request/response types
+- **Domain errors only** - Only specify domain errors in `.addError()`, infrastructure errors are handled globally
+- **Mapper functions** - Convert domain models to response schemas
+- **Handler composition** - Use Effect.gen for composable handler logic
+- **Tracing support** - Use `Effect.withSpan` for handlers and `Effect.annotateCurrentSpan` for context
+- **Error boundaries** - Map domain errors to HTTP errors in handlers
+
+## Implementation
+
+### Branded IDs
+
+**Location:** `packages/domain/src/[entity]/[entity]-id.ts`
+
+All entity IDs use Effect Schema branded types from the domain package. This provides:
+- **Type safety** - Prevents mixing up different ID types (e.g., `UserId` vs `OrganizationId`)
+- **Runtime validation** - IDs are validated as non-empty trimmed strings
+- **Serialization** - Branded IDs serialize to plain strings in JSON
+
+```typescript
+// packages/domain/src/entity/entity-id.ts
+import { Schema } from 'effect';
+
+export const EntityId = Schema.NonEmptyTrimmedString.pipe(Schema.brand('EntityId'));
+export type EntityId = typeof EntityId.Type;
+```
+
+**Usage in API schemas:**
+- Import branded IDs from the domain package
+- Use them in path params, response schemas, and HTTP errors
+- The schema handles encoding/decoding automatically
+
+### HTTP Errors
+
+**Location:** `{{webFeaturesPath}}/[domain]/error/[domain]-http-errors.ts`
+
+```typescript
+import { Schema } from "effect";
+import { HttpApiSchema } from "@effect/platform";
+import { EntityId } from "{{domainPackage}}/entity";
+
+export class EntityNotFoundHttpError extends Schema.TaggedError<EntityNotFoundHttpError>()(
+  'EntityNotFoundHttpError',
+  { entityId: EntityId, message: Schema.String },
+  HttpApiSchema.annotations({ status: 404 })
+) {}
+
+export class EntitySlugExistsHttpError extends Schema.TaggedError<EntitySlugExistsHttpError>()(
+  'EntitySlugExistsHttpError',
+  { slug: Schema.String, message: Schema.String },
+  HttpApiSchema.annotations({ status: 409 })
+) {}
+```
+
+**Naming Convention:** `[Entity][Reason]HttpError`
+
+**Common Status Codes:**
+- `400` - Bad Request (validation errors)
+- `404` - Not Found
+- `409` - Conflict (already exists)
+- `422` - Unprocessable Entity (business logic error)
+
+### API Group Definition
+
+**Location:** `{{webFeaturesPath}}/[domain]/router/[domain]-api-group.ts`
+
+All schemas (path params, query params, request payloads, response schemas) are defined **inline** in the api-group file. See [Schema Location Guidelines](./schema-pattern.md#schema-location-guidelines) for the complete reference.
+
+```typescript
+import { HttpApiEndpoint, HttpApiGroup } from '@effect/platform';
+import { Schema } from 'effect';
+import { EntityId } from "{{domainPackage}}/entity";
+
+import { ForbiddenError } from '~/features/api/error/common-api-errors';
+import { AuthMiddleware } from '~/features/api/middleware/auth-middleware';
+
+import { EntityNotFoundHttpError, EntitySlugExistsHttpError } from '../error/entity-http-errors';
+
+// =============================================================================
+// Path Parameters
+// =============================================================================
+
+export class EntityPathParams extends Schema.Class<EntityPathParams>('EntityPathParams')({
+  id: EntityId,
+}) {}
+
+// =============================================================================
+// Query Parameters
+// =============================================================================
+
+export class ListEntityQueryParams extends Schema.Class<ListEntityQueryParams>('ListEntityQueryParams')({
+  search: Schema.optional(Schema.String),
+  limit: Schema.optional(Schema.NumberFromString),
+}) {}
+
+// =============================================================================
+// Request Schemas
+// =============================================================================
+
+export class CreateEntityPayload extends Schema.Class<CreateEntityPayload>('CreateEntityPayload')({
+  name: Schema.NonEmptyString,
+  slug: EntitySlug,
+}) {}
+
+export class UpdateEntityPayload extends Schema.Class<UpdateEntityPayload>('UpdateEntityPayload')({
+  name: Schema.optional(Schema.NonEmptyString),
+  slug: Schema.optional(EntitySlug),
+}) {}
+
+// =============================================================================
+// Response Schemas
+// =============================================================================
+
+export class EntityResponse extends Schema.Class<EntityResponse>('EntityResponse')({
+  id: EntityId,
+  name: Schema.String,
+  slug: EntitySlug,
+  description: Schema.NullOr(Schema.String),  // nullable fields use NullOr
+  createdAt: Schema.Date,
+}) {}
+
+// =============================================================================
+// API Group
+// =============================================================================
+
+export class EntityApiGroup extends HttpApiGroup.make('entities')
+  .add(
+    HttpApiEndpoint.get('list', '/')
+      .setUrlParams(ListEntityQueryParams)
+      .addSuccess(Schema.Array(EntityResponse))
+      .middleware(AuthMiddleware),
+  )
+  .add(
+    HttpApiEndpoint.get('getById', '/:id')
+      .setPath(EntityPathParams)
+      .addSuccess(EntityResponse)
+      .addError(EntityNotFoundHttpError)
+      .middleware(AuthMiddleware),
+  )
+  .add(
+    HttpApiEndpoint.post('create', '/')
+      .setPayload(CreateEntityPayload)
+      .addSuccess(EntityResponse)
+      .addError(EntitySlugExistsHttpError)
+      .addError(ForbiddenError)
+      .middleware(AuthMiddleware),
+  )
+  .add(
+    HttpApiEndpoint.patch('update', '/:id')
+      .setPath(EntityPathParams)
+      .setPayload(UpdateEntityPayload)
+      .addSuccess(EntityResponse)
+      .addError(EntityNotFoundHttpError)
+      .addError(EntitySlugExistsHttpError)
+      .addError(ForbiddenError)
+      .middleware(AuthMiddleware),
+  )
+  .add(
+    HttpApiEndpoint.del('delete', '/:id')
+      .setPath(EntityPathParams)
+      .addSuccess(Schema.Void)
+      .addError(EntityNotFoundHttpError)
+      .addError(ForbiddenError)
+      .middleware(AuthMiddleware),
+  )
+  .prefix('/entities') {}
+```
+
+**Notes:**
+- All schemas are defined inline with section comments for organization
+- Only specify domain errors in `.addError()`
+- Omit `.addError()` for operations with no domain errors
+- Use descriptive endpoint names (not 'get', 'post' - use 'list', 'create', 'getById')
+
+### Handler Implementation
+
+**Location:** `{{webFeaturesPath}}/[domain]/router/[domain]-api-group.server.ts`
+
+Handlers are split into two exports for testability:
+- `[Entity]ApiGroupLayer` - Implementation WITHOUT dependencies (for testing)
+- `[Entity]ApiGroupLive` - Implementation WITH production dependencies
+
+```typescript
+import { HttpApiBuilder } from '@effect/platform';
+import { Effect, Layer, Option } from 'effect';
+import { EntityModel } from "{{domainPackage}}/entity";
+{{#if isMonorepoLayout}}
+import { EntityRepository } from "{{persistencePackage}}/entity";
+{{else}}
+import { EntityRepository } from "~/features/entity/repository/entity-repository.server";
+{{/if}}
+
+import { ApiV1Group } from '~/features/api/api-v1-group';
+import { AuthenticatedUser } from '~/features/api/middleware/auth-middleware';
+import { isAdmin } from '~/lib/policy/policy';
+
+import { EntityNotFoundHttpError, EntitySlugExistsHttpError } from '../error/entity-http-errors';
+import { EntityResponse } from './entity-api-group';
+
+// =============================================================================
+// Mapper Function
+// =============================================================================
+
+function mapEntityToResponse(entity: EntityModel): EntityResponse {
+  return new EntityResponse({
+    id: entity.id,
+    name: entity.name,
+    slug: entity.slug,
+    // Option fields: use Option.getOrNull to convert Option<T> to T | null
+    description: Option.getOrNull(entity.description),
+    createdAt: entity.createdAt,
+  });
+}
+
+// =============================================================================
+// Handler Layer
+// =============================================================================
+
+export const EntityApiGroupLayer = HttpApiBuilder.group(
+  ApiV1Group,  // Always use ApiV1Group, NOT EntityApiGroup
+  'entities',
+  Effect.fnUntraced(function* (handlers) {
+    const repository = yield* EntityRepository;
+
+    return handlers
+      // Handler with query params - no catchTag needed
+      .handle('list', ({ urlParams }) =>
+        Effect.gen(function* () {
+          const user = yield* AuthenticatedUser;
+          yield* Effect.annotateCurrentSpan({ userId: user.id, search: urlParams.search, limit: urlParams.limit });
+
+          const entities = yield* repository.findAll({ search: urlParams.search, limit: urlParams.limit });
+
+          return entities.map(mapEntityToResponse);
+        }).pipe(Effect.withSpan('EntityRouter.list')),
+      )
+
+      // Handler with single error - use catchTag
+      .handle('getById', ({ path }) =>
+        Effect.gen(function* () {
+          yield* Effect.annotateCurrentSpan({ id: path.id });
+
+          const entity = yield* repository.findById({ id: path.id });
+
+          return mapEntityToResponse(entity);
+        }).pipe(
+          Effect.withSpan('EntityRouter.getById'),
+          Effect.catchTag('EntityNotFoundError', ({ entityId }) =>
+            new EntityNotFoundHttpError({ entityId, message: 'Entity not found' }),
+          ),
+        ),
+      )
+
+      // Handler with policy and single error - use catchTag
+      .handle('create', ({ payload }) =>
+        Effect.gen(function* () {
+          yield* isAdmin;
+
+          const entity = yield* repository.create({
+            name: payload.name,
+            slug: payload.slug,
+          });
+
+          return mapEntityToResponse(entity);
+        }).pipe(
+          Effect.withSpan('EntityRouter.create'),
+          Effect.catchTag('EntitySlugExistsError', ({ slug }) =>
+            new EntitySlugExistsHttpError({ slug, message: `Slug '${slug}' already exists` }),
+          ),
+        ),
+      )
+
+      // Handler with policy and multiple errors - use catchTags
+      .handle('update', ({ path, payload }) =>
+        Effect.gen(function* () {
+          // Policy check FIRST - isAdmin fails with ForbiddenError if not admin
+          yield* isAdmin;
+
+          yield* Effect.annotateCurrentSpan({ id: path.id });
+
+          const entity = yield* repository.update({
+            id: path.id,
+            data: payload,
+          });
+
+          return mapEntityToResponse(entity);
+        }).pipe(
+          Effect.withSpan('EntityRouter.update'),
+          Effect.catchTags({
+            EntityNotFoundError: ({ entityId }) =>
+              new EntityNotFoundHttpError({ entityId, message: 'Entity not found' }),
+            EntitySlugExistsError: ({ slug }) =>
+              new EntitySlugExistsHttpError({ slug, message: `Slug '${slug}' already exists` }),
+          }),
+        ),
+      )
+
+      .handle('delete', ({ path }) =>
+        Effect.gen(function* () {
+          yield* isAdmin;
+          yield* Effect.annotateCurrentSpan({ id: path.id });
+
+          yield* repository.deleteById({ id: path.id });
+        }).pipe(
+          Effect.withSpan('EntityRouter.delete'),
+          Effect.catchTag('EntityNotFoundError', ({ entityId }) =>
+            new EntityNotFoundHttpError({ entityId, message: 'Entity not found' }),
+          ),
+        ),
+      );
+  }),
+);
+
+// =============================================================================
+// Live Layer
+// =============================================================================
+
+export const EntityApiGroupLive = EntityApiGroupLayer.pipe(
+  Layer.provide(EntityRepository.Default),
+);
+```
+
+## Policy Usage
+
+Policies provide authorization checks using Effect. A policy validates whether the current user has permission to perform an action, returning `void` on success or failing with `ForbiddenError` on denial.
+
+**Location:** `{{webAppPath}}/app/lib/policy/policy.ts`
+
+### The Policy Type
+
+```typescript
+import { Effect } from 'effect';
+import { ForbiddenError } from '~/features/api/error/common-api-errors';
+import { AuthenticatedUser } from '~/features/api/middleware/auth-middleware';
+
+/**
+ * A policy returns void if access is granted, or fails with ForbiddenError if denied.
+ */
+export type Policy<E = never, R = never> = Effect.Effect<void, ForbiddenError | E, AuthenticatedUser | R>;
+```
+
+### Simple Policy Functions
+
+```typescript
+export const isAdmin: Policy = Effect.gen(function* () {
+  const user = yield* AuthenticatedUser;
+  if (!user.isAdmin()) {
+    return yield* new ForbiddenError({
+      message: 'System admin access required',
+    });
+  }
+});
+
+// Role-based variant
+export const hasRole = (role: string): Policy =>
+  Effect.gen(function* () {
+    const user = yield* AuthenticatedUser;
+    if (user.role !== role) {
+      return yield* new ForbiddenError({
+        message: `Role required: ${role}`,
+      });
+    }
+  });
+```
+
+### Using Policies in Handlers
+
+Call policies at the start of handlers, before any business logic:
+
+```typescript
+import { isAdmin } from '~/lib/policy/policy';
+
+.handle('create', ({ payload }) =>
+  Effect.gen(function* () {
+    // Enforce policy FIRST - fails with ForbiddenError if not admin
+    yield* isAdmin;
+
+    // Then proceed with business logic
+    const entity = yield* repository.create({ data: payload });
+    return mapToEntityResponse(entity);
+  }).pipe(Effect.withSpan('EntityRouter.create'))
+)
+```
+
+**Important:** When using `isAdmin` (or any policy that throws `ForbiddenError`), declare `.addError(ForbiddenError)` on the endpoint. The error flows through automatically - no mapping needed.
+
+### Resource-Based Authorization
+
+For checks that require ownership or membership verification:
+
+```typescript
+.handle('update', ({ path, payload }) =>
+  Effect.gen(function* () {
+    const user = yield* AuthenticatedUser;
+    const existing = yield* repository.findById({ id: path.id });
+
+    // Resource-based check: user must own the resource
+    if (existing.userId !== user.id) {
+      return yield* new ForbiddenError({ message: "Cannot update another user's resource" });
+    }
+
+    const updated = yield* repository.update({ id: path.id, data: payload });
+    return mapToResponse(updated);
+  }).pipe(Effect.withSpan('EntityRouter.update'))
+)
+```
+
+### Policy Composition
+
+Combine multiple policies:
+
+```typescript
+import { all, any, isAdmin } from '~/lib/policy/policy';
+
+// AND - all policies must pass
+const canManage = all(isAdmin, otherPolicy);
+
+// OR - at least one policy must pass
+const canView = any(isAdmin, isMember);
+```
+
+## Error Handling Patterns
+
+### Single error type - use `catchTag`
+
+```typescript
+Effect.catchTag('EntityNotFoundError', ({ entityId }) =>
+  new EntityNotFoundHttpError({ entityId, message: 'Entity not found' }),
+)
+```
+
+### Multiple error types - use `catchTags`
+
+```typescript
+Effect.catchTags({
+  EntityNotFoundError: ({ entityId }) =>
+    new EntityNotFoundHttpError({ entityId, message: 'Entity not found' }),
+  EntitySlugExistsError: ({ slug }) =>
+    new EntitySlugExistsHttpError({ slug, message: `Slug already exists` }),
+})
+```
+
+## Middleware Chaining
+
+Apply multiple middleware to an endpoint by chaining `.middleware()` calls:
+
+```typescript
+HttpApiEndpoint.post('create', '/')
+  .setPayload(CreateEntityPayload)
+  .addSuccess(EntityResponse)
+  .addError(EntityNotFoundHttpError)
+  .middleware(AuthMiddleware)      // First: authentication
+  .middleware(OrgMiddleware)       // Second: organization context
+```
+
+**Order matters:** Middleware executes in the order declared. Authentication should come before organization context.
+
+**Available middleware:**
+- `AuthMiddleware` - Provides `AuthenticatedUser` context
+- `OrgMiddleware` - Provides `CurrentOrganization` context (requires `AuthMiddleware`)
+
+## Registration
+
+### API Router
+
+**Location:** `{{webFeaturesPath}}/api/api-v1-group.ts`
+
+```typescript
+import { HttpApi } from "@effect/platform";
+import { InternalServerError } from '~/features/api/error/common-api-errors';
+import { EntityApiGroup } from '~/features/entity/router/entity-api-group';
+
+export class ApiV1Group extends HttpApi.make('v1')
+  .addError(InternalServerError)
+  .add(EntityApiGroup)
+  .prefix('/api/v1') {}
+```
+
+### API Handler
+
+**Location:** `{{webFeaturesPath}}/api/api-v1-group.server.ts`
+
+```typescript
+import { HttpApiBuilder } from "@effect/platform";
+import { Layer } from "effect";
+import { ApiV1Group } from './api-v1-group';
+import { EntityApiGroupLive } from '~/features/entity/router/entity-api-group.server';
+
+export const ApiV1GroupLive = HttpApiBuilder.api(ApiV1Group).pipe(
+  Layer.provide([
+    EntityApiGroupLive,
+  ])
+);
+```
+
+## Requirements Checklist
+
+- [ ] Use branded IDs from `{{domainPackage}}` for all entity IDs
+- [ ] Use `ApiV1Group` as first arg to `HttpApiBuilder.group()`, not the ApiGroup class
+- [ ] Yield dependencies in `Effect.fnUntraced` generator at the start
+- [ ] **Map domain models to response schemas** using `mapTo[Entity]Response()` in handlers
+- [ ] **Handle Option fields** with `Option.getOrNull()` in mapper functions
+- [ ] `Effect.withSpan('RouterName.handler')` for tracing each handler
+- [ ] Only catch domain errors - infrastructure errors are defects
+- [ ] `yield* Effect.annotateCurrentSpan({ id, organizationId })` for handler-specific tracing context
+- [ ] Register in `api-v1-group.ts` and `api-v1-group.server.ts`
+
+## Common Pitfalls
+
+1. **Don't use `Schema.String` for IDs** - Use branded IDs from `{{domainPackage}}`
+2. **Don't use ApiGroup class in HttpApiBuilder.group()** - Always use `ApiV1Group`
+3. **Don't return domain models from handlers** - Always map to response schemas
+4. **Don't forget Option conversion** - Use `Option.getOrNull()` for Option fields in mappers
+5. **Don't catch infrastructure errors** - Let them become defects
+6. **Don't forget error mapping** - Map domain errors to HTTP errors
+7. **Don't forget tracing** - Add `Effect.withSpan()` to every handler
+
+## Related Patterns
+
+- [Repository Pattern](./repository-pattern.md) - Data access layer used by handlers
+- [Error Handling Pattern](./error-handling-pattern.md) - Domain error mapping

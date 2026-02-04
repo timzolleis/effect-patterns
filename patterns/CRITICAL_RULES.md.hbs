@@ -1,0 +1,127 @@
+# Critical Rules
+
+**Read this before writing Effect code.** These rules prevent common bugs.
+
+---
+
+## Quick Reference
+
+| Rule | Bad | Good | Details |
+|------|-----|------|---------|
+| Type safety | `any`, `as T` | `Schema.make()`, `Schema.decodeUnknown()` | - |
+| Error types | `new Error()` | `Schema.TaggedError` | [error-handling-pattern.md](./error-handling-pattern.md) |
+| Error catching | `catchAllCause` | `catchTag`, `catchAll`, `mapError` | [error-handling-pattern.md](./error-handling-pattern.md) |
+| Option/Either | `Schema.OptionFromSelf` | `Schema.Option` | [schema-pattern.md](./schema-pattern.md) |
+| Data classes | `Schema.Struct` | `Schema.Class` | [schema-pattern.md](./schema-pattern.md) |
+| Construction | `new Class()` | `Class.make()` | [schema-pattern.md](./schema-pattern.md) |
+| Development | Skip typecheck | Run `{{commands.typecheck}}` after every change | - |
+
+---
+
+## Type Safety
+
+### NEVER use `any` or type casts (`x as Y`)
+
+```typescript
+// ❌ BAD
+const data: any = someValue
+const id = value as AccountId
+
+// ✅ GOOD
+const id = AccountId.make(rawId)
+const result = yield* Schema.decodeUnknown(Account)(data)
+```
+
+**Alternatives to casting:**
+- `Schema.make()` for branded types
+- `Schema.decodeUnknown()` for parsing unknown data
+- `identity<T>()` from `effect/Function` for compile-time verification
+
+### NEVER use global `Error` in Effect error channel
+
+```typescript
+// ❌ BAD - breaks typed error handling
+const bad: Effect.Effect<Result, Error> = Effect.fail(new Error("failed"))
+
+// ✅ GOOD - TaggedError IS an Effect, no Effect.fail() needed
+const good: Effect.Effect<Result, EntityNotFoundError> =
+  new EntityNotFoundError({ entityId })
+```
+
+> **Details:** [error-handling-pattern.md](./error-handling-pattern.md)
+
+---
+
+## Error Handling
+
+### NEVER use `catchAllCause`
+
+`catchAllCause` catches BOTH errors AND defects (bugs). This hides bugs that should crash.
+
+```typescript
+// ❌ BAD - catches defects too!
+Effect.catchAllCause(effect, (cause) => new WrappedError({ cause: Cause.squash(cause) }))
+
+// ✅ GOOD - only catches expected errors
+Effect.catchAll(effect, (error) => new WrappedError({ cause: error }))
+```
+
+| Situation | Use This |
+|-----------|----------|
+| Handle one specific error | `Effect.catchTag('ErrorTag', ...)` |
+| Transform all errors | `Effect.catchAll` or `Effect.mapError` |
+| Convert to defect | `Effect.orDie` |
+| **Never use** | `Effect.catchAllCause` |
+
+> **Details:** [error-handling-pattern.md](./error-handling-pattern.md)
+
+---
+
+## Schema
+
+### NEVER use `*FromSelf` schemas
+
+```typescript
+// ❌ BAD - not JSON serializable
+parentId: Schema.OptionFromSelf(AccountId)
+
+// ✅ GOOD - encodes to { _tag: "Some", value: X } | { _tag: "None" }
+parentId: Schema.Option(AccountId)
+```
+
+Applies to: `Option`, `Either`, `Chunk`, `List`, `HashMap`, `HashSet`
+
+### ALWAYS use `Schema.Class`, not `Schema.Struct`
+
+`Schema.Class` provides: Equal/Hash (value equality), `.make()` constructor, custom methods.
+
+> **Details:** [schema-pattern.md](./schema-pattern.md)
+
+---
+
+## Development Workflow
+
+### NEVER skip type annotations on Effect code
+
+```typescript
+// ❌ BAD - types won't infer correctly
+const findById = Effect.fn('Repository.findById')(function* ({ id }) { ... });
+
+// ✅ GOOD - explicit annotation required
+const findById: (args: { id: string }) => Effect.Effect<Entity, EntityNotFoundError, never> =
+  Effect.fn('Repository.findById')(function* ({ id }) { ... });
+```
+
+### NEVER continue development without passing typecheck
+
+```bash
+{{commands.typecheck}}  # Run after EVERY file change
+```
+
+---
+
+## Related Patterns
+
+- [schema-pattern.md](./schema-pattern.md) - Detailed Schema patterns
+- [error-handling-pattern.md](./error-handling-pattern.md) - Error handling in depth
+- [repository-pattern.md](./repository-pattern.md) - Repository patterns

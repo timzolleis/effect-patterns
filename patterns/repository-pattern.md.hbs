@@ -1,0 +1,497 @@
+# Repository Pattern
+
+## Overview
+
+Repositories provide the data access layer using Prisma and Effect.Service for dependency injection.
+{{#if isMonorepoLayout}}
+They live in `packages/persistence` and return domain models from `packages/domain`.
+{{else}}
+They live in `features/[domain]/repository/[domain]-repository.server.ts` and return domain models from `packages/domain`.
+{{/if}}
+
+For architecture diagrams, see [README.md](./README.md).
+
+## Principles
+
+- **Return Domain Models** - Repository methods MUST return domain model schema classes, not raw Prisma types
+- **Immutable Arrays** - Use `ReadonlyArray<T>` for array return types to promote immutability
+- **Branded IDs** - Use branded types for all entity IDs to ensure type safety
+- **ID Generation** - ALWAYS generate IDs with domain-specific prefixes (e.g., `org_`, `user_`) - never rely on DB defaults
+- **Domain error typing** - Type domain errors (NotFound, AlreadyExists) in Effect signature
+- **Infrastructure errors as defects** - Non-domain errors use `Effect.orDie`
+- **Tracing support** - Use `Effect.fn` with descriptive names and `Effect.annotateCurrentSpan`
+- **Explicit type annotations** - ALWAYS annotate method signatures
+
+## Error Handling Philosophy
+
+| Operation | Domain Error | Pattern |
+|-----------|--------------|---------|
+| `findAll()` | None | `Effect.orDie` |
+| `findById()` | `NotFoundError` | `handlePrismaError(PrismaNotFoundError)` |
+| `create()` | `AlreadyExistsError` | `handlePrismaError(PrismaUniqueConstraintViolationError)` |
+| `update()` | `NotFoundError`, `AlreadyExistsError` | `handlePrismaError(PrismaNotFoundError, PrismaUniqueConstraintViolationError)` |
+| `delete()` | `NotFoundError` | `handlePrismaError(PrismaNotFoundError)` |
+
+## File Locations
+
+See [Schema Pattern - Schema Location Guidelines](./schema-pattern.md#schema-location-guidelines) for the complete file location reference.
+
+**Repository-specific:**
+{{#if isMonorepoLayout}}
+- Repository: `packages/persistence/src/[entity]/[entity]-repository.ts`
+{{else}}
+- Repository: `{{webFeaturesPath}}/[entity]/repository/[entity]-repository.server.ts`
+- PrismaService: `{{webAppPath}}/app/lib/prisma/prisma-service.server.ts`
+{{/if}}
+
+## ID Generation
+
+**CRITICAL:** All IDs MUST be generated in the repository with domain-specific prefixes. Never rely on Prisma/DB defaults.
+
+```typescript
+import { createId } from "@paralleldrive/cuid2";
+
+const id = `org_${createId()}`;  // Prefixed CUID2
+```
+
+| Entity | Prefix | Example |
+|--------|--------|---------|
+| Organization | `org_` | `org_ch72gsb320000udocl363eofy` |
+| OrganizationMember | `orgm_` | `orgm_ch72gsb320000udocl363eofy` |
+| User | `user_` | `user_ch72gsb320000udocl363eofy` |
+| LinkedAccount | `la_` | `la_ch72gsb320000udocl363eofy` |
+
+---
+
+## Basic Repository Implementation
+
+### Step 1: Define Domain Types (packages/domain)
+
+**Branded ID** (`packages/domain/src/entity/entity-id.ts`):
+
+```typescript
+import { Schema } from "effect";
+
+export const EntityId = Schema.NonEmptyTrimmedString.pipe(Schema.brand("EntityId"));
+export type EntityId = typeof EntityId.Type;
+```
+
+**Domain Model** (`packages/domain/src/entity/entity-model.ts`):
+
+```typescript
+import { Schema } from "effect";
+import { EntityId } from "./entity-id";
+
+export class EntityModel extends Schema.Class<EntityModel>("EntityModel")({
+  id: EntityId,
+  name: Schema.String,
+  description: Schema.NullOr(Schema.String),
+  createdAt: Schema.Date,
+  updatedAt: Schema.Date,
+}) {}
+```
+
+**Domain Error** (`packages/domain/src/entity/entity-errors.ts`):
+
+```typescript
+import { Schema } from "effect";
+import { EntityId } from "./entity-id";
+
+export class EntityNotFoundError extends Schema.TaggedError<EntityNotFoundError>()(
+  "EntityNotFoundError",
+  { entityId: EntityId }
+) {}
+
+export class EntitySlugExistsError extends Schema.TaggedError<EntitySlugExistsError>()(
+  "EntitySlugExistsError",
+  { slug: Schema.String }
+) {}
+```
+
+{{#if isMonorepoLayout}}
+### Step 2: Implement Repository (packages/persistence)
+
+```typescript
+import { createId } from "@paralleldrive/cuid2";
+import { EntityId } from "{{domainPackage}}/entity/entity-id";
+import { EntityModel } from "{{domainPackage}}/entity/entity-model";
+import { EntityNotFoundError, EntitySlugExistsError } from "{{domainPackage}}/entity/entity-errors";
+import { Effect } from "effect";
+import type { Entity } from "../../prisma/models";
+import { handlePrismaError } from "../service/parse-prisma-error";
+import { PrismaNotFoundError, PrismaUniqueConstraintViolationError } from "../service/prisma-errors";
+import { PrismaService } from "../service/prisma-service";
+{{else}}
+### Step 2: Implement Repository (features/[entity]/repository/)
+
+**Location:** `{{webFeaturesPath}}/[entity]/repository/[entity]-repository.server.ts`
+
+```typescript
+import { createId } from "@paralleldrive/cuid2";
+import { EntityId } from "{{domainPackage}}/entity/entity-id";
+import { EntityModel } from "{{domainPackage}}/entity/entity-model";
+import { EntityNotFoundError, EntitySlugExistsError } from "{{domainPackage}}/entity/entity-errors";
+import { Effect } from "effect";
+import type { Entity } from "@prisma/client";
+import { handlePrismaError } from "~/lib/prisma/parse-prisma-error";
+import { PrismaNotFoundError, PrismaUniqueConstraintViolationError } from "~/lib/prisma/prisma-errors";
+import { PrismaService } from "~/lib/prisma/prisma-service.server";
+{{/if}}
+
+// =============================================================================
+// Mapper
+// =============================================================================
+
+const toEntityModel = (row: Entity): EntityModel =>
+  new EntityModel({
+    id: EntityId.make(row.id),
+    name: row.name,
+    description: row.description ?? null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  });
+
+// =============================================================================
+// Repository
+// =============================================================================
+
+export class EntityRepository extends Effect.Service<EntityRepository>()("EntityRepository", {
+  dependencies: [PrismaService.Default],
+  effect: Effect.gen(function* () {
+    const prisma = yield* PrismaService;
+
+    // findAll - no domain errors, infrastructure errors become defects
+    const findAll: () => Effect.Effect<ReadonlyArray<EntityModel>> =
+      Effect.fn("EntityRepository.findAll")(function* () {
+        return yield* prisma
+          .use((client) => client.entity.findMany({ orderBy: { createdAt: "desc" } }))
+          .pipe(
+            Effect.map((rows) => rows.map(toEntityModel)),
+            Effect.orDie
+          );
+      });
+
+    // findById - NotFound is a domain error
+    const findById: (args: { id: EntityId }) => Effect.Effect<EntityModel, EntityNotFoundError> =
+      Effect.fn("EntityRepository.findById")(function* ({ id }) {
+        yield* Effect.annotateCurrentSpan({ entityId: id });
+
+        return yield* prisma
+          .use((client) => client.entity.findUniqueOrThrow({ where: { id } }))
+          .pipe(
+            Effect.catchAll(handlePrismaError(PrismaNotFoundError)),
+            Effect.catchTag("PrismaNotFoundError", () => new EntityNotFoundError({ entityId: id })),
+            Effect.map(toEntityModel)
+          );
+      });
+
+    // create - SlugExists is a domain error
+    const create: (args: {
+      name: string;
+      slug: string;
+      description?: string | null;
+    }) => Effect.Effect<EntityModel, EntitySlugExistsError> =
+      Effect.fn("EntityRepository.create")(function* ({ name, slug, description }) {
+        yield* Effect.annotateCurrentSpan({ name, slug });
+
+        const id = `ent_${createId()}`;  // ALWAYS generate prefixed ID
+
+        return yield* prisma
+          .use((client) =>
+            client.entity.create({
+              data: { id, name, slug, description },
+            })
+          )
+          .pipe(
+            Effect.catchAll(handlePrismaError(PrismaUniqueConstraintViolationError)),
+            Effect.catchTag("PrismaUniqueConstraintViolationError", () =>
+              new EntitySlugExistsError({ slug })
+            ),
+            Effect.map(toEntityModel)
+          );
+      });
+
+    // update - NotFound and SlugExists are domain errors
+    const update: (args: {
+      id: EntityId;
+      data: { name?: string; slug?: string; description?: string | null };
+    }) => Effect.Effect<EntityModel, EntityNotFoundError | EntitySlugExistsError> =
+      Effect.fn("EntityRepository.update")(function* ({ id, data }) {
+        yield* Effect.annotateCurrentSpan({ entityId: id });
+
+        return yield* prisma
+          .use((client) =>
+            client.entity.update({
+              where: { id },
+              data,
+            })
+          )
+          .pipe(
+            Effect.catchAll(handlePrismaError(PrismaNotFoundError, PrismaUniqueConstraintViolationError)),
+            Effect.catchTag("PrismaNotFoundError", () => new EntityNotFoundError({ entityId: id })),
+            Effect.catchTag("PrismaUniqueConstraintViolationError", () =>
+              new EntitySlugExistsError({ slug: data.slug! })
+            ),
+            Effect.map(toEntityModel)
+          );
+      });
+
+    // delete - returns void, NotFound is a domain error
+    const deleteById: (args: { id: EntityId }) => Effect.Effect<void, EntityNotFoundError> =
+      Effect.fn("EntityRepository.delete")(function* ({ id }) {
+        yield* Effect.annotateCurrentSpan({ entityId: id });
+
+        yield* prisma
+          .use((client) => client.entity.delete({ where: { id } }))
+          .pipe(
+            Effect.catchAll(handlePrismaError(PrismaNotFoundError)),
+            Effect.catchTag("PrismaNotFoundError", () => new EntityNotFoundError({ entityId: id }))
+          );
+      });
+
+    return { findAll, findById, create, update, delete: deleteById } as const;
+  }),
+}) {}
+```
+
+---
+
+## Nullable Fields with Option
+
+**Use `Option<T>` for nullable fields** - this is the Effect-native approach that makes optionality explicit.
+
+**Domain model** uses `Schema.OptionFromNullOr`:
+```typescript
+// packages/domain/src/organization/organization-model.ts
+export class OrganizationModel extends Schema.Class<OrganizationModel>('OrganizationModel')({
+  id: OrganizationId,
+  name: Schema.String,
+  keycloakGroupId: Schema.OptionFromNullOr(KeycloakGroupId),  // Option<KeycloakGroupId>
+}) {}
+```
+
+**Repository mapper** converts Prisma's `T | null` to `Option<T>`:
+```typescript
+import { Option } from "effect";
+
+const toOrganizationModel = (row: Organization): OrganizationModel =>
+  new OrganizationModel({
+    id: OrganizationId.make(row.id),
+    name: row.name,
+    // Convert null -> Option.none(), value -> Option.some(branded)
+    keycloakGroupId: Option.fromNullable(row.keycloakGroupId).pipe(
+      Option.map((id) => KeycloakGroupId.make(id))
+    ),
+  });
+```
+
+**Why Option over `T | null`?**
+- Explicit optionality in the type system
+- Rich combinators: `Option.map`, `Option.flatMap`, `Option.getOrElse`
+- `Schema.OptionFromNullOr` handles JSON encoding/decoding automatically (`Option` ↔ `null`)
+
+---
+
+## Join Table / Many-to-Many Repository
+
+Join tables (e.g., `OrganizationMember`) require special handling:
+
+1. **Composite keys** for lookups/deletes
+2. **Preflight existence checks** for foreign keys (since SQLite can't tell which FK failed)
+3. **void return type** with `Effect.asVoid`
+
+```typescript
+import { createId } from "@paralleldrive/cuid2";
+import {
+  OrganizationMemberAlreadyExistsError,
+  OrganizationMemberNotFoundError,
+  OrganizationNotFoundError,
+} from "{{domainPackage}}/organization/organization-errors";
+import { OrganizationId } from "{{domainPackage}}/organization/organization-id";
+import { UserNotFoundError } from "{{domainPackage}}/user/user-errors";
+import { UserId } from "{{domainPackage}}/user/user-id";
+import { Effect } from "effect";
+import { handlePrismaError } from "../service/parse-prisma-error";
+import { PrismaNotFoundError, PrismaUniqueConstraintViolationError } from "../service/prisma-errors";
+import { PrismaService } from "../service/prisma-service";
+
+export class OrganizationMemberRepository extends Effect.Service<OrganizationMemberRepository>()(
+  "OrganizationMemberRepository",
+  {
+    dependencies: [PrismaService.Default],
+    effect: Effect.gen(function* () {
+      const prisma = yield* PrismaService;
+
+      const addUserToOrganization: (args: {
+        userId: UserId;
+        organizationId: OrganizationId;
+      }) => Effect.Effect<
+        void,
+        UserNotFoundError | OrganizationNotFoundError | OrganizationMemberAlreadyExistsError
+      > = Effect.fn("OrganizationMemberRepository.addUserToOrganization")(function* ({
+        userId,
+        organizationId,
+      }) {
+        yield* Effect.annotateCurrentSpan({ userId, organizationId });
+
+        // Preflight checks: verify both FKs exist before insert
+        // SQLite cannot tell us which FK constraint failed, so we check manually
+        const [userExists, orgExists] = yield* Effect.all([
+          prisma.use((client) => client.user.findUnique({ where: { id: userId }, select: { id: true } })),
+          prisma.use((client) =>
+            client.organization.findUnique({ where: { id: organizationId }, select: { id: true } })
+          ),
+        ]).pipe(Effect.orDie);
+
+        if (!userExists) {
+          return yield* new UserNotFoundError({ userId });
+        }
+        if (!orgExists) {
+          return yield* new OrganizationNotFoundError({ organizationId });
+        }
+
+        const id = `orgm_${createId()}`;  // ALWAYS generate prefixed ID
+
+        yield* prisma
+          .use((client) =>
+            client.organizationMember.create({
+              data: { id, userId, organizationId },
+            })
+          )
+          .pipe(
+            Effect.catchAll(handlePrismaError(PrismaUniqueConstraintViolationError)),
+            Effect.catchTag(
+              "PrismaUniqueConstraintViolationError",
+              () => new OrganizationMemberAlreadyExistsError({ userId, organizationId })
+            ),
+            Effect.asVoid  // Discard the created record, return void
+          );
+      });
+
+      const removeUserFromOrganization: (args: {
+        userId: UserId;
+        organizationId: OrganizationId;
+      }) => Effect.Effect<void, OrganizationMemberNotFoundError> = Effect.fn(
+        "OrganizationMemberRepository.removeUserFromOrganization"
+      )(function* ({ userId, organizationId }) {
+        yield* Effect.annotateCurrentSpan({ userId, organizationId });
+
+        yield* prisma
+          .use((client) =>
+            client.organizationMember.delete({
+              // Composite key lookup
+              where: { organizationId_userId: { organizationId, userId } },
+            })
+          )
+          .pipe(
+            Effect.catchAll(handlePrismaError(PrismaNotFoundError)),
+            Effect.catchTag(
+              "PrismaNotFoundError",
+              () => new OrganizationMemberNotFoundError({ userId, organizationId })
+            ),
+            Effect.asVoid
+          );
+      });
+
+      return { addUserToOrganization, removeUserFromOrganization } as const;
+    }),
+  }
+) {}
+```
+
+### Key Patterns for Join Tables
+
+| Pattern | Usage |
+|---------|-------|
+| Preflight FK checks | `Effect.all([...]).pipe(Effect.orDie)` then check nulls |
+| Composite key lookup | `where: { field1_field2: { field1, field2 } }` |
+| void return | Don't `Effect.map(toModel)`, use `Effect.asVoid` if needed |
+| ID generation | Still required: `orgm_${createId()}` |
+
+---
+
+## SQLite Constraint Limitation
+
+**Important:** SQLite cannot distinguish which unique constraint was violated. If a table has multiple unique constraints (e.g., both `name` and `slug`), you must use **preflight checks** instead of relying on the constraint error:
+
+```typescript
+// BAD: SQLite can't tell if name or slug caused the violation
+Effect.catchTag("PrismaUniqueConstraintViolationError", ({ constraint }) =>
+  constraint.includes("slug")
+    ? new SlugExistsError({ slug })
+    : new NameExistsError({ name })
+)
+
+// GOOD: Check before insert
+const slugExists = yield* prisma
+  .use((client) => client.entity.findUnique({ where: { slug }, select: { id: true } }))
+  .pipe(Effect.orDie);
+
+if (slugExists) {
+  return yield* new EntitySlugExistsError({ slug });
+}
+
+// Now create - any remaining constraint error is unexpected
+yield* prisma.use((client) => client.entity.create({ data: { ... } })).pipe(Effect.orDie);
+```
+
+For tables with **single unique constraint**, the simpler `catchTag` approach works fine.
+
+---
+
+## handlePrismaError API
+
+`handlePrismaError` accepts multiple error schemas as varargs:
+
+```typescript
+import { handlePrismaError } from "../service/parse-prisma-error";
+import { PrismaNotFoundError, PrismaUniqueConstraintViolationError } from "../service/prisma-errors";
+
+// Single error type
+Effect.catchAll(handlePrismaError(PrismaNotFoundError))
+
+// Multiple error types
+Effect.catchAll(handlePrismaError(PrismaNotFoundError, PrismaUniqueConstraintViolationError))
+```
+
+Errors NOT in the schema list become defects (Effect.die).
+
+---
+
+## Requirements Checklist
+
+- [ ] **Domain types in packages/domain** - ID, Model, Errors
+{{#if isMonorepoLayout}}
+- [ ] **Repository in packages/persistence** - Extend Effect.Service
+{{else}}
+- [ ] **Repository in features/[entity]/repository/** - Extend Effect.Service
+{{/if}}
+- [ ] **ID generation with prefix** - `prefix_${createId()}` in every create
+- [ ] **Mapper function** - `to[Entity]Model()` converting Prisma rows
+- [ ] **Return domain models** - Never return raw Prisma types
+- [ ] **ReadonlyArray for lists** - Use `ReadonlyArray<T>` not `T[]`
+- [ ] **Explicit type annotations** on ALL methods
+- [ ] **Effect.fn with tracing** - `"EntityRepository.methodName"`
+- [ ] **Effect.annotateCurrentSpan** for traced operations
+- [ ] **handlePrismaError** for domain errors
+- [ ] **Effect.orDie** for infrastructure-only operations
+- [ ] **`as const`** on return object
+
+## Common Pitfalls
+
+1. **Don't skip ID generation** - Always use `prefix_${createId()}`, never rely on DB defaults
+2. **Don't return raw Prisma types** - Always map to domain model Schema classes
+3. **Don't forget the mapper** - Every Prisma query result must be mapped
+4. **Don't use plain strings for IDs** - Use branded types: `EntityId.make(row.id)`
+5. **Don't type infrastructure errors** - Let them become defects via `Effect.orDie`
+6. **Don't forget type annotations** - `Effect.fn` requires explicit signatures
+7. **Don't forget `as const`** - On the return object
+8. **Don't rely on SQLite constraint detection** - Use preflight checks for multiple unique constraints
+9. **Don't forget Option for nullable branded types** - Use `Option.fromNullable` pattern
+10. **Don't use mutable arrays** - Use `ReadonlyArray<T>` for return types, not `T[]`
+
+## Related Patterns
+
+- [Schema Pattern](./schema-pattern.md) - Branded types and domain model definitions
+- [Error Handling Pattern](./error-handling-pattern.md) - Domain error definitions
+- [HTTP API Pattern](./http-api-pattern.md) - HTTP handlers using repositories

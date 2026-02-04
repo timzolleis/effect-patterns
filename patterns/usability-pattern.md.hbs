@@ -1,0 +1,320 @@
+# Usability Pattern
+
+Guidelines for consistent, high-quality UI/UX across the application. This pattern documents empty states, loading states, error handling, containers, and form patterns.
+
+---
+
+## Principles
+
+1. **Handle all four states** - Initial → Loading → Empty/Error → Success
+2. **Use Result.builder** - Declarative rendering based on async state
+3. **Consistent containers** - Use SimpleCardContainer, SimpleListContainer for visual consistency
+4. **Composable empty states** - Use Empty slots for flexible empty state composition
+5. **Meaningful errors** - Answer WHAT happened, WHY, and WHAT TO DO
+
+---
+
+## Result-Driven Rendering
+
+Always use `Result.builder` for rendering async data. For detailed API patterns, see [effect-atom-pattern.md](./effect-atom-pattern.md).
+
+### Quick Reference
+
+```typescript
+Result.builder(result)
+  .onErrorTag('EntityNotFoundError', () => <NotFound />)  // Specific errors first
+  .onFailure(() => <GenericError />)                       // Fallback for unexpected
+  .onSuccess((data) => <SuccessView data={data} />)        // Success case
+  .render()                                                 // Always call .render()
+```
+
+### Suppressing Errors for Secondary Data
+
+```typescript
+// Secondary/optional data - hide section if fails
+Result.builder(secondaryResult)
+  .onSuccess((data) => <SecondarySection data={data} />)
+  .onFailure(() => null)  // Silently hide on error
+  .render()
+```
+
+---
+
+## Empty States
+
+### Composable Empty Slots
+
+Use the composable `Empty` slots for flexible empty state composition:
+
+```typescript
+import {
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+  EmptyContent,
+} from '~/components/ui/empty';
+
+<Empty>
+  <EmptyHeader>
+    <EmptyMedia variant="icon">
+      <SearchXIcon className="size-5" />
+    </EmptyMedia>
+    <EmptyTitle>No integrations found</EmptyTitle>
+    <EmptyDescription>
+      Create your first integration to connect external services.
+    </EmptyDescription>
+  </EmptyHeader>
+  <EmptyContent>
+    <Button onClick={onCreateClick}>
+      <PlusIcon className="size-4" />
+      Create Integration
+    </Button>
+  </EmptyContent>
+</Empty>
+```
+
+### Empty Slot Components
+
+| Component | Purpose |
+|-----------|---------|
+| `Empty` | Main wrapper with centered, flex layout |
+| `EmptyHeader` | Groups icon, title, and description |
+| `EmptyMedia` | Icon container with `variant="icon"` for styled background |
+| `EmptyTitle` | Main heading (text-lg, font-medium) |
+| `EmptyDescription` | Secondary text with link support |
+| `EmptyContent` | CTA buttons area |
+
+### Empty State Scenarios
+
+| Scenario | Content |
+|----------|---------|
+| No data yet | Icon + "Get started" title + Description + Create CTA |
+| No search results | Search icon + "No results" + Clear filters CTA |
+| Empty after filter | Filter icon + "No matches" + Adjust filters suggestion |
+| Permission denied | Lock icon + "Access denied" + Contact admin suggestion |
+
+---
+
+## Container Components
+
+### SimpleCardContainer
+
+Animated card with border and shadow. Use for form sections and detail views.
+
+```typescript
+import { SimpleCardContainer } from '~/components/ui/card-container';
+
+// Basic usage
+<SimpleCardContainer>
+  <FormFields />
+</SimpleCardContainer>
+
+// Disable animation (for static content)
+<SimpleCardContainer animate={false}>
+  <StaticContent />
+</SimpleCardContainer>
+```
+
+### SimpleListContainer
+
+Automatically styles list items with rounded corners and dividers.
+
+```typescript
+import { SimpleListContainer } from '~/components/ui/card-container';
+
+<SimpleListContainer>
+  {items.map((item) => (
+    <SimpleCardContainer key={item.id} animate={false}>
+      <ItemRow item={item} />
+    </SimpleCardContainer>
+  ))}
+</SimpleListContainer>
+```
+
+### Container Selection Guide
+
+| Use Case | Container |
+|----------|-----------|
+| Simple form section | `SimpleCardContainer` |
+| List of items | `SimpleListContainer` + `SimpleCardContainer` |
+| Card with title/description | `CardContainer` with header slots |
+| Animated content changes | `SimpleCardContainer` (default) |
+| Static content | `SimpleCardContainer animate={false}` |
+
+### Button Styling in Lists
+
+When placing buttons inside list items, avoid `variant="outline"`. Use `variant="ghost"` instead.
+
+---
+
+## Error Handling
+
+### matchErrorMessage Utility
+
+Convert Effect causes to user-friendly messages:
+
+```typescript
+import { matchErrorMessage } from '~/lib/error/match-error-message';
+import { Match } from 'effect';
+
+const errorMessage = matchErrorMessage(
+  cause,
+  Match.tags({
+    EntityNotFoundError: () => t('errors.notFound'),
+    ValidationError: ({ message }) => message,
+    ForbiddenError: () => tCommon('errors.forbidden'),
+  })
+);
+
+toast.error(errorMessage);
+```
+
+### Error Display Guidelines
+
+| Error Type | Display Method |
+|------------|----------------|
+| Form field validation | Inline field error |
+| Form submission error | Toast notification |
+| Page load error | Error component via `onErrorTag` |
+| Permission error | Dedicated error component |
+| Network error | Toast with retry option |
+
+---
+
+## Toast Notifications
+
+### When to Use Toasts
+
+| Action | Toast Type | Example |
+|--------|------------|---------|
+| Save success | `toast.success` | "Settings saved" |
+| Create success | `toast.success` | "Integration created" |
+| Delete success | `toast.success` | "User removed" |
+| Mutation error | `toast.error` | "Failed to save: [reason]" |
+
+### Toast Patterns
+
+```typescript
+import { toast } from 'sonner';
+
+// Simple success
+toast.success(t('notifications.saved'));
+
+// Error with specific message
+toast.error(t('errors.saveFailed'), {
+  description: errorDetails,
+});
+
+// Toast with action
+toast.error(t('errors.networkError'), {
+  action: {
+    label: t('common.retry'),
+    onClick: () => refetch(),
+  },
+});
+```
+
+---
+
+## Error Message Structure
+
+### The WHAT / WHY / WHAT TO DO Pattern
+
+Error messages should answer three questions:
+
+| Question | Purpose | Example |
+|----------|---------|---------|
+| **WHAT** happened? | State the problem clearly | "Unable to save changes" |
+| **WHY** did it happen? | Explain the cause | "The server couldn't be reached" |
+| **WHAT TO DO** about it? | Provide actionable next steps | "Check your connection and try again" |
+
+```typescript
+// ❌ BAD - vague, no actionable info
+toast.error("Something went wrong");
+
+// ✅ GOOD - answers WHAT/WHY/WHAT TO DO
+toast.error("Unable to save changes", {
+  description: "The server couldn't be reached. Check your connection and try again.",
+  action: {
+    label: "Retry",
+    onClick: () => handleRetry(),
+  },
+});
+```
+
+---
+
+## Loading States
+
+### Skeleton Loaders
+
+Match skeleton layout to actual content:
+
+```typescript
+function EntityListSkeleton() {
+  return (
+    <SimpleListContainer>
+      {Array.from({ length: 5 }).map((_, i) => (
+        <SimpleCardContainer key={i} animate={false}>
+          <div className="flex items-center gap-4">
+            <Skeleton className="h-10 w-10 rounded-full" />
+            <div className="space-y-2 flex-1">
+              <Skeleton className="h-4 w-1/3" />
+              <Skeleton className="h-3 w-1/2" />
+            </div>
+          </div>
+        </SimpleCardContainer>
+      ))}
+    </SimpleListContainer>
+  );
+}
+```
+
+### Button Loading States
+
+```typescript
+<Button disabled={isSubmitting}>
+  {isSubmitting ? (
+    <>
+      <Loader2 className="size-4 animate-spin" />
+      {t('buttons.saving')}
+    </>
+  ) : (
+    t('buttons.save')
+  )}
+</Button>
+```
+
+---
+
+## Requirements Checklist
+
+### Data & State
+- [ ] Use `Result.builder` for all async data rendering
+- [ ] Handle all states: loading, empty, error, success
+- [ ] Use composable `Empty` slots for empty states
+- [ ] Match skeleton loaders to actual content layout
+
+### Layout & Components
+- [ ] Use `SimpleCardContainer`/`SimpleListContainer` for consistent layout
+
+### Forms & Feedback
+- [ ] Use `matchErrorMessage` for error toasts
+- [ ] Debounce search inputs (200ms)
+- [ ] Error messages answer WHAT/WHY/WHAT TO DO
+
+### Accessibility
+- [ ] All interactive elements keyboard accessible
+- [ ] Icon-only buttons have `aria-label`
+- [ ] Form inputs have associated labels
+- [ ] Focus visible on all focusable elements
+
+---
+
+## Related Patterns
+
+- [effect-atom-pattern.md](./effect-atom-pattern.md) - Query/mutation patterns, Result.builder details
+- [form-pattern.md](./form-pattern.md) - Form validation and submission
+- [error-handling-pattern.md](./error-handling-pattern.md) - Domain error handling

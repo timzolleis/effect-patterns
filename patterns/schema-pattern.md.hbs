@@ -1,0 +1,408 @@
+# Schema Pattern
+
+Effect Schema is used for data validation, serialization, and domain modeling. This pattern covers best practices for defining schemas in the codebase.
+
+---
+
+## Schema Location Guidelines
+
+**This is the single source of truth for where schemas are defined.**
+
+| Schema Type | Location | Package |
+|-------------|----------|---------|
+| **Branded IDs** | `src/[entity]/[entity]-id.ts` | `{{domainPackage}}` |
+| **Domain Models** | `src/[entity]/[entity]-model.ts` | `{{domainPackage}}` |
+| **Domain Errors** | `src/[entity]/[entity]-errors.ts` | `{{domainPackage}}` |
+{{#if isMonorepoLayout}}
+| **Prisma Errors** | `src/service/prisma-errors.ts` | `{{persistencePackage}}` |
+{{else}}
+| **Prisma Errors** | `app/lib/prisma/prisma-errors.ts` | Web app |
+{{/if}}
+| **HTTP Errors** | `features/[entity]/error/[entity]-http-errors.ts` | Web app |
+| **API schemas** (request, response, path params) | Inline in `router/[entity]-api-group.ts` | Web app |
+| **Mappers** (Domain → Response) | `router/[entity]-api-group.server.ts` | Web app |
+| **Form schemas** | `features/[entity]/schema/[entity]-form-schema.ts` | Web app |
+
+### Key Rules
+
+1. **Domain models and IDs live in packages/domain** - This is the source of truth for domain types
+2. **Repositories return domain models** - Never return raw Prisma types
+3. **API schemas are ALWAYS inline** - Never create a separate file for request/response schemas
+4. **HTTP errors stay in the web app** - They're app-specific, not domain concerns
+
+### Package Structure
+
+```
+packages/domain/
+├── src/
+│   ├── user/
+│   │   ├── user-id.ts          # UserId branded type
+│   │   ├── user-model.ts       # UserModel, UserRole, etc.
+│   │   └── user-errors.ts      # UserNotFoundError, etc.
+│   ├── app/
+│   │   ├── app-id.ts           # AppId, ApiKeyId
+│   │   ├── app-model.ts        # AppModel, ApiKeyModel
+│   │   └── app-errors.ts       # AppNotFoundError, etc.
+│   └── [entity]/
+│       ├── [entity]-id.ts
+│       ├── [entity]-model.ts
+│       └── [entity]-errors.ts
+└── package.json                 # Exports each file individually
+
+{{#if isMonorepoLayout}}
+packages/persistence/
+├── src/
+│   ├── service/
+│   │   ├── prisma-service.ts   # PrismaService Effect wrapper
+│   │   ├── prisma-errors.ts    # PrismaNotFoundError, etc.
+│   │   └── parse-prisma-error.ts
+│   └── [entity]/
+│       └── [entity]-repository.ts  # Imports from {{domainPackage}}
+└── package.json
+{{/if}}
+
+{{webAppPath}}/
+{{#unless isMonorepoLayout}}
+├── app/lib/prisma/
+│   ├── prisma-service.server.ts   # PrismaService Effect wrapper
+│   ├── prisma-errors.ts           # PrismaNotFoundError, etc.
+│   └── parse-prisma-error.ts
+{{/unless}}
+└── app/features/[entity]/
+    ├── error/
+    │   └── [entity]-http-errors.ts  # HTTP errors with status codes
+{{#unless isMonorepoLayout}}
+    ├── repository/
+    │   └── [entity]-repository.server.ts  # Imports from {{domainPackage}}
+{{/unless}}
+    └── router/
+        ├── [entity]-api-group.ts       # API schemas INLINE
+        └── [entity]-api-group.server.ts  # Handlers + response mappers
+```
+
+---
+
+## Principles
+
+1. **Schema.Class over Schema.Struct** - Classes provide Equal/Hash, constructors, and methods
+2. **Branded types for IDs** - Type-safe identifiers prevent mixing
+3. **Standard schemas, not *FromSelf** - Use JSON-serializable variants
+4. **Value-based equality** - Use `Equal.equals()`, not `===`
+
+---
+
+## Branded Types for IDs
+
+### Creating Branded Types
+
+Use `Schema.brand` to create type-safe IDs that can't be mixed up:
+
+**Location:** `packages/domain/src/[entity]/[entity]-id.ts`
+
+```typescript
+import { Schema } from 'effect';
+
+// Define branded type
+export const UserId = Schema.NonEmptyTrimmedString.pipe(
+  Schema.brand('UserId')
+);
+export type UserId = typeof UserId.Type;
+
+export const OrganizationId = Schema.NonEmptyTrimmedString.pipe(
+  Schema.brand('OrganizationId')
+);
+export type OrganizationId = typeof OrganizationId.Type;
+```
+
+### Type Safety in Action
+
+```typescript
+// Usage - type safety prevents mixing IDs
+const userId = UserId.make('user_123');
+const orgId = OrganizationId.make('org_456');
+
+function findUser(id: UserId): Effect.Effect<User, UserNotFoundError> {
+  // ...
+}
+
+findUser(userId);  // OK
+findUser(orgId);   // Type error! OrganizationId is not UserId
+```
+
+### Importing Branded Types
+
+```typescript
+// In persistence package
+import { UserId } from '{{domainPackage}}/user/user-id';
+import { AppId, ApiKeyId } from '{{domainPackage}}/app/app-id';
+
+// In web app
+import { UserId } from '{{domainPackage}}/user/user-id';
+```
+
+---
+
+## Domain Models with Schema.Class
+
+### Why Schema.Class is Required
+
+`Schema.Class` provides significant benefits over `Schema.Struct`:
+
+| Feature | Schema.Class | Schema.Struct |
+|---------|--------------|---------------|
+| Constructor via `new` or `.make()` | Yes | Yes |
+| Equal/Hash (value equality) | Automatic | No |
+| Custom methods/getters | Yes | No |
+| Type guard via `Schema.is()` | Yes | Yes |
+| Instanceof checks | Yes | No |
+
+### Defining Domain Models
+
+**Location:** `packages/domain/src/[entity]/[entity]-model.ts`
+
+```typescript
+import { Schema } from 'effect';
+import { UserId } from './user-id';
+
+export const UserRole = Schema.Literal('admin', 'user');
+export type UserRole = Schema.Schema.Type<typeof UserRole>;
+
+export class UserModel extends Schema.Class<UserModel>('UserModel')({
+  id: UserId,
+  name: Schema.NullOr(Schema.String),
+  email: Schema.String,
+  image: Schema.NullOr(Schema.String),
+  role: UserRole,
+  createdAt: Schema.Date,
+}) {
+  // Custom methods are supported
+  get displayName(): string {
+    return this.name ?? this.email;
+  }
+}
+
+// For list views with subset of fields
+export class UserSummaryModel extends Schema.Class<UserSummaryModel>('UserSummaryModel')({
+  id: UserId,
+  name: Schema.NullOr(Schema.String),
+  email: Schema.String,
+}) {}
+```
+
+### Models with Relations
+
+```typescript
+import { Schema } from 'effect';
+import { TeamId } from '../team/team-id';
+import { TeamModel } from '../team/team-model';
+import { OrganizationId } from './organization-id';
+
+export class OrganizationModel extends Schema.Class<OrganizationModel>('OrganizationModel')({
+  id: OrganizationId,
+  name: Schema.String,
+  slug: Schema.NullOr(Schema.String),
+  createdAt: Schema.Date,
+}) {}
+
+// Variant with nested relations
+export class OrganizationWithTeamsModel extends Schema.Class<OrganizationWithTeamsModel>(
+  'OrganizationWithTeamsModel'
+)({
+  id: OrganizationId,
+  name: Schema.String,
+  slug: Schema.NullOr(Schema.String),
+  teams: Schema.Array(TeamModel),
+  createdAt: Schema.Date,
+}) {}
+```
+
+### Models with Encrypted Data
+
+```typescript
+import { Schema } from 'effect';
+import { DataSourceConfigId } from './data-source-config-id';
+import { OrganizationId } from '../organization/organization-id';
+
+// Schema for encrypted payload
+export class EncryptedPayload extends Schema.Class<EncryptedPayload>('EncryptedPayload')({
+  iv: Schema.String,
+  ciphertext: Schema.String,
+}) {}
+
+// Model stores encrypted data
+export class EncryptedDataSourceConfigModel extends Schema.Class<EncryptedDataSourceConfigModel>(
+  'EncryptedDataSourceConfigModel'
+)({
+  id: DataSourceConfigId,
+  encryptionKey: Schema.String,
+  provider: Schema.String,
+  configValue: EncryptedPayload,
+  organizationId: OrganizationId,
+  createdAt: Schema.Date,
+  updatedAt: Schema.Date,
+}) {}
+```
+
+---
+
+## Domain Errors with Schema.TaggedError
+
+### Defining Errors
+
+**Location:** `packages/domain/src/[entity]/[entity]-errors.ts`
+
+```typescript
+import { Schema } from 'effect';
+import { UserId } from './user-id';
+
+export class UserNotFoundError extends Schema.TaggedError<UserNotFoundError>()(
+  'UserNotFoundError',
+  {
+    userId: UserId,
+  }
+) {}
+
+export class UserEmailExistsError extends Schema.TaggedError<UserEmailExistsError>()(
+  'UserEmailExistsError',
+  {
+    email: Schema.String,
+  }
+) {}
+```
+
+### Error Naming Convention
+
+| Error Type | Naming Pattern | Example |
+|------------|----------------|---------|
+| Not Found | `[Entity]NotFoundError` | `UserNotFoundError` |
+| Already Exists | `[Entity][Field]ExistsError` | `UserEmailExistsError` |
+| Validation | `[Entity]ValidationError` | `InviteExpiredError` |
+| Already Used | `[Entity]AlreadyUsedError` | `InviteAlreadyUsedError` |
+
+---
+
+## Package Exports
+
+### Domain Package (packages/domain/package.json)
+
+Uses granular exports for tree-shaking:
+
+```json
+{
+  "name": "{{domainPackage}}",
+  "exports": {
+    "./user/user-id": {
+      "types": "./src/user/user-id.ts",
+      "default": "./src/user/user-id.ts"
+    },
+    "./user/user-model": {
+      "types": "./src/user/user-model.ts",
+      "default": "./src/user/user-model.ts"
+    },
+    "./user/user-errors": {
+      "types": "./src/user/user-errors.ts",
+      "default": "./src/user/user-errors.ts"
+    }
+  }
+}
+```
+
+### Import Examples
+
+```typescript
+// Importing IDs
+import { UserId } from '{{domainPackage}}/user/user-id';
+import { AppId, ApiKeyId } from '{{domainPackage}}/app/app-id';
+import { OrganizationId } from '{{domainPackage}}/organization/organization-id';
+
+// Importing models
+import { UserModel, UserRole } from '{{domainPackage}}/user/user-model';
+import { AppModel, ApiKeyModel } from '{{domainPackage}}/app/app-model';
+
+// Importing errors
+import { UserNotFoundError } from '{{domainPackage}}/user/user-errors';
+import { AppNotFoundError, AppNameExistsError } from '{{domainPackage}}/app/app-errors';
+```
+
+---
+
+## Value-Based Equality
+
+### Using Equal.equals
+
+Effect provides value-based equality through `Equal.equals`:
+
+```typescript
+import { Equal } from 'effect';
+
+// With JavaScript ===, two objects with same data are NOT equal
+const obj1 = { id: '123', name: 'Test' };
+const obj2 = { id: '123', name: 'Test' };
+obj1 === obj2;  // false - different object references
+
+// With Effect's Equal.equals, Schema.Class objects with same data ARE equal
+const user1 = new UserModel({ id: UserId.make('user_123'), name: 'Test', email: 'test@example.com', ... });
+const user2 = new UserModel({ id: UserId.make('user_123'), name: 'Test', email: 'test@example.com', ... });
+Equal.equals(user1, user2);  // true - same values!
+```
+
+### Important: Always Use Equal.equals
+
+```typescript
+// ❌ WRONG - only true for same object reference
+if (user1 === user2) { ... }
+
+// ✅ CORRECT - true for same values
+if (Equal.equals(user1, user2)) { ... }
+```
+
+---
+
+## Never Use *FromSelf Schemas
+
+### The Problem
+
+`*FromSelf` schemas expect the runtime representation directly, which is not JSON serializable.
+
+```typescript
+// ❌ BAD - OptionFromSelf expects runtime Option, not JSON
+export class Entity extends Schema.Class<Entity>('Entity')({
+  id: EntityId,
+  parentId: Schema.OptionFromSelf(EntityId),  // NOT JSON serializable
+}) {}
+
+// ✅ GOOD - Schema.NullOr encodes properly
+export class Entity extends Schema.Class<Entity>('Entity')({
+  id: EntityId,
+  parentId: Schema.NullOr(EntityId),  // JSON serializable
+}) {}
+```
+
+### Use Standard Variants
+
+| Use This | Not This |
+|----------|----------|
+| `Schema.NullOr` | `Schema.OptionFromSelf` |
+| `Schema.Option` | `Schema.OptionFromSelf` |
+| `Schema.Array` | `Schema.ChunkFromSelf` |
+
+---
+
+## Requirements Checklist
+
+- [ ] **IDs in packages/domain** - `[entity]-id.ts` with `Schema.brand()`
+- [ ] **Models in packages/domain** - `[entity]-model.ts` with `Schema.Class`
+- [ ] **Errors in packages/domain** - `[entity]-errors.ts` with `Schema.TaggedError`
+- [ ] Use `Schema.Class` for all domain entities
+- [ ] Use branded types for all IDs
+- [ ] Use standard schemas, not `*FromSelf` variants
+- [ ] Use `Equal.equals()` for value comparison
+- [ ] Repositories return domain models, not Prisma types
+
+---
+
+## Related Patterns
+
+- [Repository Pattern](./repository-pattern.md) - Using schemas in repositories
+- [Error Handling Pattern](./error-handling-pattern.md) - Error patterns with TaggedError
+- [HTTP API Pattern](./http-api-pattern.md) - API schemas in handlers

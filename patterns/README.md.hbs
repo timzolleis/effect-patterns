@@ -1,0 +1,139 @@
+# Implementation Patterns
+
+Pattern documentation for Effect-based implementations.
+
+---
+
+## Start Here
+
+**Before writing any Effect code:** Read [CRITICAL_RULES.md](./CRITICAL_RULES.md)
+
+---
+
+## Pattern Index
+
+### Domain Layer (packages/domain)
+
+| Task | Pattern |
+|------|---------|
+| Create branded ID (e.g., `UserId`) | [schema-pattern.md](./schema-pattern.md) |
+| Define domain model | [schema-pattern.md](./schema-pattern.md) |
+| Define domain error | [error-handling-pattern.md](./error-handling-pattern.md) |
+
+{{#if isMonorepoLayout}}
+### Persistence Layer (packages/persistence)
+{{else}}
+### Repository Layer (features/[entity]/repository/)
+{{/if}}
+
+| Task | Pattern |
+|------|---------|
+| Add database operations | [repository-pattern.md](./repository-pattern.md) |
+| Handle "not found" from Prisma | [repository-pattern.md](./repository-pattern.md) |
+| Handle unique constraint error | [repository-pattern.md](./repository-pattern.md) |
+| Map Prisma row to domain model | [repository-pattern.md](./repository-pattern.md) |
+
+### HTTP Layer (Web App)
+
+| Task | Pattern |
+|------|---------|
+| Add API endpoint | [http-api-pattern.md](./http-api-pattern.md) |
+| Define HTTP error (with status) | [error-handling-pattern.md](./error-handling-pattern.md) |
+| Map domain error → HTTP error | [http-api-pattern.md](./http-api-pattern.md) |
+
+### Backend: Authorization
+
+| Task | Pattern |
+|------|---------|
+| Add permission check | [http-api-pattern.md](./http-api-pattern.md#policy-usage) |
+| Add resource-based auth | [http-api-pattern.md](./http-api-pattern.md#resource-based-authorization) |
+
+### Backend: Error Handling
+
+| Task | Pattern |
+|------|---------|
+| Catch specific error | [error-handling-pattern.md](./error-handling-pattern.md) |
+| Catch multiple errors | [error-handling-pattern.md](./error-handling-pattern.md) |
+| Make infra error a defect | [error-handling-pattern.md](./error-handling-pattern.md) |
+
+### Frontend: Data Fetching
+
+| Task | Pattern |
+|------|---------|
+| Fetch data in component | [effect-atom-pattern.md](./effect-atom-pattern.md) |
+| Query with parameters | [effect-atom-pattern.md](./effect-atom-pattern.md) |
+| Combine multiple queries | [effect-atom-pattern.md](./effect-atom-pattern.md) |
+
+### Frontend: Forms
+
+| Task | Pattern |
+|------|---------|
+| Create form with validation | [form-pattern.md](./form-pattern.md) |
+| Define form schema | [form-pattern.md](./form-pattern.md) |
+| Handle form errors | [form-pattern.md](./form-pattern.md) |
+
+### Frontend: UI/UX
+
+| Task | Pattern |
+|------|---------|
+| Handle loading/empty/error | [usability-pattern.md](./usability-pattern.md) |
+| Show empty state | [usability-pattern.md](./usability-pattern.md) |
+| Show toast notification | [usability-pattern.md](./usability-pattern.md) |
+
+### Testing
+
+| Task | Pattern |
+|------|---------|
+| Test HTTP API router | [testing-pattern.md](./testing-pattern.md) |
+| Test repository | [testing-pattern.md](./testing-pattern.md) |
+| Test error cases | [testing-pattern.md](./testing-pattern.md) |
+
+---
+
+## Feature Implementation Order
+
+When building a new feature, implement in this order:
+
+```
+1. packages/domain/src/[entity]/
+   ├── [entity]-id.ts       # Branded ID types
+   ├── [entity]-model.ts    # Schema.Class domain models
+   └── [entity]-errors.ts   # Domain errors (TaggedError)
+
+{{#if isMonorepoLayout}}
+2. packages/persistence/src/[entity]/
+   └── [entity]-repository.ts   # Effect.Service with CRUD
+
+3. {{webFeaturesPath}}/[entity]/
+{{else}}
+2. {{webFeaturesPath}}/[entity]/
+   ├── repository/
+   │   └── [entity]-repository.server.ts  # Effect.Service with CRUD
+{{/if}}
+   ├── error/
+   │   └── [entity]-http-errors.ts  # HTTP errors with status codes
+   └── router/
+       ├── [entity]-api-group.ts        # API endpoint definitions
+       └── [entity]-api-group.server.ts # Handlers + response mappers
+
+{{#if isMonorepoLayout}}
+4. tests/
+{{else}}
+3. tests/
+{{/if}}
+   └── features/[entity]/[entity]-api-group.test.ts
+```
+
+---
+
+## Quick Rules
+
+- **Type annotations required** - All Effect code needs explicit types
+- **Domain in packages/domain** - IDs, models, and domain errors
+{{#if isMonorepoLayout}}
+- **Persistence in packages/persistence** - Repositories only
+{{else}}
+- **Repositories in features/[entity]/repository/** - Co-located with feature
+{{/if}}
+- **HTTP in web app** - HTTP errors and handlers
+- **Typecheck always** - Run `{{commands.typecheck}}` after every change

@@ -1,0 +1,317 @@
+# Form Pattern
+
+## Quick Reference
+
+### Imports
+
+```tsx
+// Form
+import { Controller, useForm } from "react-hook-form";
+import { effectTsResolver } from "@hookform/resolvers/effect-ts";
+import { useTranslation } from "react-i18next";
+import { useState } from "react";
+
+// UI
+import { Button } from "~/components/ui/button";
+import { Input } from "~/components/ui/input";
+import { Textarea } from "~/components/ui/textarea";
+import { Checkbox } from "~/components/ui/checkbox";
+import { Switch } from "~/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
+import { UnsavedChangesIndicator } from "~/components/ui/unsaved-changes-indicator";
+import {
+  Field,
+  FieldContent,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+  FieldLegend,
+  FieldSet,
+  FieldTitle,
+} from "~/components/ui/field";
+
+// API & Errors
+import { useAtomSet } from "@effect-atom/atom-react";
+import { Exit, Match } from "effect";
+import { toast } from "sonner";
+import { AtomV1ApiClient } from "~/features/api/client/api-client";
+import { matchErrorMessage } from "~/lib/error/match-error-message";
+```
+
+### Schema
+
+**Location:** `{{webFeaturesPath}}/[feature]/schema/[name]-form-schema.ts`
+
+```typescript
+import { Schema } from "effect";
+
+export const MyFormSchema = Schema.Struct({
+  firstName: Schema.String.pipe(
+    Schema.minLength(1, { message: () => "feature:form.firstNameRequired" })
+  ),
+  lastName: Schema.String.pipe(
+    Schema.minLength(1, { message: () => "feature:form.lastNameRequired" })
+  ),
+  email: Schema.String.pipe(
+    Schema.pattern(/^[^\s@]+@[^\s@]+\.[^\s@]+$/, {
+      message: () => "feature:form.invalidEmail",
+    })
+  ),
+  notifications: Schema.Array(Schema.String), // checkbox array
+});
+
+export type MyFormData = typeof MyFormSchema.Type;
+```
+
+### Form Component
+
+**Location:** `{{webFeaturesPath}}/[feature]/components/[name]-form.tsx` or `{{webAppPath}}/app/components/[feature]/[name]-form.tsx`
+
+```tsx
+export function MyForm({ onSuccess }: { onSuccess?: () => void }) {
+  const { t } = useTranslation("feature");
+  const { t: tCommon } = useTranslation("common");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const mutation = useAtomSet(AtomV1ApiClient.mutation("apiGroup", "create"), {
+    mode: "promiseExit",
+  });
+
+  const form = useForm<MyFormData>({
+    resolver: effectTsResolver(MyFormSchema),
+    defaultValues: {
+      firstName: "",
+      lastName: "",
+      email: "",
+      notifications: [],
+    },
+  });
+
+  const onSubmit = async (data: MyFormData) => {
+    setIsSubmitting(true);
+    const result = await mutation({
+      payload: data,
+      reactivityKeys: MyReactivityKeys, // if using reactivity
+    });
+    setIsSubmitting(false);
+
+    Exit.match(result, {
+      onSuccess: () => {
+        toast.success(t("messages.created"));
+        onSuccess?.();
+      },
+      onFailure: (cause) => {
+        const errorMessage = matchErrorMessage(
+          cause,
+          Match.tags({
+            MyEntityNotFoundHttpError: () => t("errors.notFound"),
+            MyEntityAlreadyExistsHttpError: () => t("errors.alreadyExists"),
+          })
+        );
+        toast.error(errorMessage);
+      },
+    });
+  };
+
+  return (
+    <form onSubmit={form.handleSubmit(onSubmit)} className="flex flex-col gap-4">
+      <FieldGroup>
+        {/* Fields go here - see Field Patterns below */}
+      </FieldGroup>
+
+      <div className="flex items-center justify-end gap-3">
+        <UnsavedChangesIndicator show={form.formState.isDirty} />
+        <Button type="submit" disabled={form.formState.isSubmitting || !form.formState.isDirty}>
+          {t("actions.save")}
+        </Button>
+      </div>
+    </form>
+  );
+}
+```
+
+## Field Patterns
+
+### Standard Field (Input/Textarea)
+
+```tsx
+<Controller
+  name="firstName"
+  control={form.control}
+  render={({ field, fieldState }) => (
+    <Field data-invalid={fieldState.invalid}>
+      <FieldLabel htmlFor={field.name}>{t("form.firstName")}</FieldLabel>
+      <Input {...field} id={field.name} aria-invalid={fieldState.invalid} />
+      {fieldState.invalid && <FieldError errors={[fieldState.error]} />}
+    </Field>
+  )}
+/>
+```
+
+### Field Type Differences
+
+| Type | Component | Value/Change Props |
+|------|-----------|-------------------|
+| Input | `<Input {...field} />` | spread field |
+| Textarea | `<Textarea {...field} value={field.value ?? ""} />` | spread field, handle null |
+| Select | `<Select value={field.value} onValueChange={field.onChange}>` | explicit props |
+| Switch | `<Switch checked={field.value} onCheckedChange={field.onChange} />` | checked/onCheckedChange |
+| Checkbox | `<Checkbox checked={field.value} onCheckedChange={field.onChange} />` | checked/onCheckedChange |
+
+### Select
+
+```tsx
+<Controller
+  name="language"
+  control={form.control}
+  render={({ field, fieldState }) => (
+    <Field data-invalid={fieldState.invalid}>
+      <FieldLabel htmlFor={field.name}>{t("form.language")}</FieldLabel>
+      <Select name={field.name} value={field.value} onValueChange={field.onChange}>
+        <SelectTrigger id={field.name} aria-invalid={fieldState.invalid}>
+          <SelectValue placeholder={t("form.selectLanguage")} />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="en">English</SelectItem>
+          <SelectItem value="de">Deutsch</SelectItem>
+        </SelectContent>
+      </Select>
+      {fieldState.invalid && <FieldError errors={[fieldState.error]} />}
+    </Field>
+  )}
+/>
+```
+
+### Switch (horizontal layout)
+
+```tsx
+<Controller
+  name="active"
+  control={form.control}
+  render={({ field, fieldState }) => (
+    <Field orientation="horizontal" data-invalid={fieldState.invalid}>
+      <FieldContent>
+        <FieldLabel htmlFor={field.name}>{t("form.active")}</FieldLabel>
+        <FieldDescription>{t("form.activeDescription")}</FieldDescription>
+      </FieldContent>
+      <Switch
+        id={field.name}
+        checked={field.value}
+        onCheckedChange={field.onChange}
+        aria-invalid={fieldState.invalid}
+      />
+    </Field>
+  )}
+/>
+```
+
+### Checkbox Array
+
+```tsx
+const options = [
+  { id: "email", label: "form.emailNotifications" },
+  { id: "push", label: "form.pushNotifications" },
+  { id: "sms", label: "form.smsNotifications" },
+];
+
+<Controller
+  name="notifications"
+  control={form.control}
+  render={({ field, fieldState }) => (
+    <FieldSet>
+      <FieldLegend variant="label">{t("form.notifications")}</FieldLegend>
+      <FieldGroup data-slot="checkbox-group">
+        {options.map((option) => (
+          <Field key={option.id} orientation="horizontal">
+            <Checkbox
+              id={`notification-${option.id}`}
+              checked={field.value.includes(option.id)}
+              onCheckedChange={(checked) => {
+                field.onChange(
+                  checked
+                    ? [...field.value, option.id]
+                    : field.value.filter((v) => v !== option.id)
+                );
+              }}
+            />
+            <FieldLabel htmlFor={`notification-${option.id}`} className="font-normal">
+              {t(option.label)}
+            </FieldLabel>
+          </Field>
+        ))}
+      </FieldGroup>
+      {fieldState.invalid && <FieldError errors={[fieldState.error]} />}
+    </FieldSet>
+  )}
+/>
+```
+
+## Unsaved Changes Indicator
+
+Use `UnsavedChangesIndicator` to show users when they have unsaved changes. The component uses the `common:form.unsavedChanges` translation and animates in/out with a blur effect.
+
+```tsx
+<div className="flex items-center justify-end gap-3">
+  <UnsavedChangesIndicator show={form.formState.isDirty} />
+  <Button type="submit" disabled={form.formState.isSubmitting || !form.formState.isDirty}>
+    {t("actions.save")}
+  </Button>
+</div>
+```
+
+**Props:**
+- `show: boolean` - When true, displays the "Unsaved changes" text with animation
+
+**Best practices:**
+- Place next to the save button in the form actions area
+- Disable the save button when `!form.formState.isDirty` (no changes)
+- Also disable when `form.formState.isSubmitting` (submission in progress)
+- Call `form.reset(data)` after successful save to clear the dirty state
+
+## Error Handling
+
+HTTP errors are matched by their `_tag` (class name):
+
+```typescript
+// In: {{webFeaturesPath}}/[feature]/error/[feature]-http-errors.ts
+export class MyEntityNotFoundHttpError extends Schema.TaggedError<MyEntityNotFoundHttpError>()(
+  "MyEntityNotFoundHttpError",  // <-- This is the tag for Match.tags()
+  { id: MyEntityId, message: Schema.String },
+  HttpApiSchema.annotations({ status: 404 })
+) {}
+```
+
+```typescript
+// In form submit handler
+Exit.match(result, {
+  onSuccess: () => { /* ... */ },
+  onFailure: (cause) => {
+    const errorMessage = matchErrorMessage(
+      cause,
+      Match.tags({
+        MyEntityNotFoundHttpError: () => t("errors.notFound"),
+        MyEntityAlreadyExistsHttpError: () => t("errors.alreadyExists"),
+        ForbiddenError: () => tCommon("errors.forbidden"),
+      })
+    );
+    toast.error(errorMessage);
+  },
+});
+```
+
+## Checklist
+
+- [ ] Use `<Controller />` for all fields
+- [ ] `data-invalid={fieldState.invalid}` on `<Field />`
+- [ ] `aria-invalid={fieldState.invalid}` on form control
+- [ ] `{fieldState.invalid && <FieldError errors={[fieldState.error]} />}`
+- [ ] `useAtomSet` with `mode: "promiseExit"` for mutations
+- [ ] `Exit.match` with `matchErrorMessage` + `Match.tags` for errors
+- [ ] Translation keys in schema messages: `"namespace:path.to.key"`
+
+## Related Patterns
+
+- [effect-atom-pattern.md](./effect-atom-pattern.md) - More on useAtomSet mutations
+- [http-api-pattern.md](./http-api-pattern.md) - API endpoint definitions
+- [error-handling-pattern.md](./error-handling-pattern.md) - HTTP error classes

@@ -1,0 +1,370 @@
+# Error Handling Pattern
+
+## Overview
+
+Error handling in Effect distinguishes between **domain errors** (expected, recoverable) and **infrastructure errors** (unexpected, defects). The codebase uses a three-layer error hierarchy.
+
+## Error Hierarchy
+
+```
+HTTP Errors ({{webAppPath}})
+  └─ EntityNotFoundHttpError (404), EntityAlreadyExistsHttpError (409)
+        │ catches and maps
+        ▼
+Domain Errors (packages/domain)
+  └─ EntityNotFoundError, EntityNameExistsError
+        │ catches and maps
+        ▼
+{{#if isMonorepoLayout}}
+Prisma Errors (packages/persistence)
+  └─ PrismaNotFoundError, PrismaUniqueConstraintViolationError
+{{else}}
+Prisma Errors ({{webAppPath}}/app/lib/prisma/)
+  └─ PrismaNotFoundError, PrismaUniqueConstraintViolationError
+{{/if}}
+```
+
+## Error Flow
+
+```
+Prisma error → handlePrismaError() → Domain error → catchTag → HTTP error
+         OR → Effect.die (infrastructure defect)
+```
+
+## Principles
+
+- **Domain errors are typed** - They appear in the Effect signature and must be handled
+- **Infrastructure errors are defects** - They don't appear in signatures and crash the fiber
+- **Use Schema.TaggedError** - For domain errors with serialization support
+- **Map Prisma errors to domain errors** - Convert infrastructure errors to domain errors where appropriate
+- **Never catch infrastructure errors** - Let them become defects
+
+## Error Philosophy
+
+| Error Type | Examples | Handling | In Type Signature? |
+|------------|----------|----------|-------------------|
+| Domain | NotFound, AlreadyExists, ValidationError | `Effect.catchTag` | Yes |
+| Infrastructure | DB connection lost, network timeout | `Effect.die` (defect) | No |
+
+**Key insight:** If a caller can reasonably recover from an error, it's a domain error. If it indicates a system failure, it's an infrastructure error (defect).
+
+## Implementation
+
+### 1. Domain Error Definition
+
+**Location:** `packages/domain/src/[entity]/[entity]-errors.ts`
+
+```typescript
+import { Schema } from 'effect';
+import { EntityId } from './entity-id';
+
+export class EntityNotFoundError extends Schema.TaggedError<EntityNotFoundError>()(
+  'EntityNotFoundError',
+  {
+    entityId: EntityId
+  }
+) {}
+
+export class EntityNameExistsError extends Schema.TaggedError<EntityNameExistsError>()(
+  'EntityNameExistsError',
+  {
+    name: Schema.String
+  }
+) {}
+
+export class EntityValidationError extends Schema.TaggedError<EntityValidationError>()(
+  'EntityValidationError',
+  {
+    field: Schema.String,
+    message: Schema.String
+  }
+) {}
+```
+
+**Naming Convention:** `[Entity][Reason]Error`
+
+### 2. Prisma Error Handling
+
+{{#if isMonorepoLayout}}
+**Location:** `packages/persistence/src/service/prisma-errors.ts`
+{{else}}
+**Location:** `{{webAppPath}}/app/lib/prisma/prisma-errors.ts`
+{{/if}}
+
+```typescript
+import { Schema } from 'effect';
+
+export class PrismaNotFoundError extends Schema.TaggedError<PrismaNotFoundError>()(
+  'PrismaNotFoundError',
+  { modelName: Schema.String, message: Schema.String }
+) {}
+
+export class PrismaUniqueConstraintViolationError extends Schema.TaggedError<PrismaUniqueConstraintViolationError>()(
+  'PrismaUniqueConstraintViolationError',
+  { message: Schema.String, modelName: Schema.String, constraint: Schema.String }
+) {}
+
+export class PrismaForeignKeyViolationError extends Schema.TaggedError<PrismaForeignKeyViolationError>()(
+  'PrismaForeignKeyViolationError',
+  { message: Schema.String, modelName: Schema.String, constraint: Schema.String }
+) {}
+```
+
+### 3. HTTP Error Definition
+
+**Location:** `{{webFeaturesPath}}/[entity]/error/[entity]-http-errors.ts`
+
+```typescript
+import { Schema } from 'effect';
+import { HttpApiSchema } from '@effect/platform';
+
+export class EntityNotFoundHttpError extends Schema.TaggedError<EntityNotFoundHttpError>()(
+  'EntityNotFoundHttpError',
+  {
+    entityId: Schema.String,
+    message: Schema.String
+  },
+  HttpApiSchema.annotations({ status: 404 })
+) {}
+
+export class EntityAlreadyExistsHttpError extends Schema.TaggedError<EntityAlreadyExistsHttpError>()(
+  'EntityAlreadyExistsHttpError',
+  {
+    name: Schema.String,
+    message: Schema.String
+  },
+  HttpApiSchema.annotations({ status: 409 })
+) {}
+
+export class EntityValidationHttpError extends Schema.TaggedError<EntityValidationHttpError>()(
+  'EntityValidationHttpError',
+  {
+    field: Schema.String,
+    message: Schema.String
+  },
+  HttpApiSchema.annotations({ status: 422 })
+) {}
+```
+
+**Common HTTP Status Codes:**
+- `400` - Bad Request (malformed input)
+- `404` - Not Found
+- `409` - Conflict (already exists, version mismatch)
+- `422` - Unprocessable Entity (validation error, business logic error)
+
+### 4. Error Mapping in Repository
+
+{{#if isMonorepoLayout}}
+**Location:** `packages/persistence/src/[entity]/[entity]-repository.ts`
+{{else}}
+**Location:** `{{webFeaturesPath}}/[entity]/repository/[entity]-repository.server.ts`
+{{/if}}
+
+```typescript
+import { handlePrismaError } from '../service/parse-prisma-error';
+import { PrismaNotFoundError, PrismaUniqueConstraintViolationError } from '../service/prisma-errors';
+import { EntityNotFoundError, EntityNameExistsError } from '{{domainPackage}}/entity/entity-errors';
+
+// For findById - handle NotFound
+const findById: (args: { id: EntityId }) => Effect.Effect<EntityModel, EntityNotFoundError, never> =
+  Effect.fn('Repository.findById')(function* ({ id }) {
+    return yield* prisma
+      .use((c) => c.entity.findFirstOrThrow({ where: { id } }))
+      .pipe(
+        Effect.catchAll(handlePrismaError(PrismaNotFoundError)),
+        Effect.catchTag('PrismaNotFoundError', () =>
+          new EntityNotFoundError({ entityId: id })
+        )
+      );
+  });
+
+// For create - handle UniqueConstraint
+const create: (data: CreateData) => Effect.Effect<EntityModel, EntityNameExistsError, never> =
+  Effect.fn('Repository.create')(function* (data) {
+    return yield* prisma
+      .use((c) => c.entity.create({ data }))
+      .pipe(
+        Effect.catchAll(handlePrismaError(PrismaUniqueConstraintViolationError)),
+        Effect.catchTag('PrismaUniqueConstraintViolationError', () =>
+          new EntityNameExistsError({ name: data.name })
+        )
+      );
+  });
+
+// For findAll - no domain errors, use orDie for infrastructure errors
+const findAll: () => Effect.Effect<ReadonlyArray<EntityModel>, never, never> =
+  Effect.fn('Repository.findAll')(function* () {
+    return yield* prisma.use((c) => c.entity.findMany()).pipe(Effect.orDie);
+  });
+```
+
+### 5. Error Mapping in HTTP Handlers
+
+**Location:** `{{webFeaturesPath}}/[entity]/router/[entity]-api-group.server.ts`
+
+```typescript
+.handle('getById', ({ path }) =>
+  Effect.gen(function* () {
+    const entity = yield* repository.findById({ id: path.id });
+    return toEntityResponse(entity);
+  }).pipe(
+    Effect.withSpan('EntityRouter.getById'),
+    Effect.catchTag('EntityNotFoundError', ({ entityId }) =>
+      new EntityNotFoundHttpError({
+        entityId,
+        message: `Entity with id ${entityId} not found`
+      })
+    )
+  )
+)
+
+.handle('create', ({ payload }) =>
+  Effect.gen(function* () {
+    const entity = yield* repository.create(payload);
+    return toEntityResponse(entity);
+  }).pipe(
+    Effect.withSpan('EntityRouter.create'),
+    Effect.catchTag('EntityNameExistsError', ({ name }) =>
+      new EntityAlreadyExistsHttpError({
+        name,
+        message: `Entity with name '${name}' already exists`
+      })
+    )
+  )
+)
+```
+
+## catchTag vs catchAll vs catchAllCause
+
+This is **critical** for correct error handling.
+
+### Use catchTag for Specific Error Recovery
+
+`Effect.catchTag` catches a specific tagged error and lets you recover:
+
+```typescript
+const program = fetchEntity(id).pipe(
+  // Handle specific error - recover with default
+  Effect.catchTag('EntityNotFoundError', () =>
+    Effect.succeed(createDefaultEntity())
+  ),
+  // Handle another specific error - transform
+  Effect.catchTag('EntityValidationError', (error) =>
+    new EntityValidationHttpError({
+      field: error.field,
+      message: error.message
+    })
+  )
+);
+```
+
+### Use catchAll for Error Transformation
+
+`Effect.catchAll` catches ALL expected errors and transforms them:
+
+```typescript
+// Transform all domain errors to HTTP errors
+const httpProgram = repository.findById({ id }).pipe(
+  Effect.catchAll((error) =>
+    // error is EntityNotFoundError | EntityValidationError
+    // TaggedError IS an Effect - return directly
+    new EntityHttpError({
+      message: error.message,
+      cause: error,
+    })
+  )
+);
+```
+
+### NEVER Use catchAllCause
+
+**`Effect.catchAllCause` catches BOTH errors AND defects (bugs).** This is almost always wrong.
+
+```typescript
+// ❌ BAD - hides bugs!
+const dangerous = someEffect.pipe(
+  Effect.catchAllCause((cause) =>
+    new WrappedError({ cause: Cause.squash(cause) })  // Catches defects too!
+  )
+);
+// If someEffect has a null pointer error (defect), it gets swallowed!
+
+// ✅ GOOD - only catch expected errors
+const safe = someEffect.pipe(
+  Effect.catchAll((error) =>
+    new WrappedError({ cause: error })
+  )
+);
+// Defects still crash the fiber (as they should)
+```
+
+### Error Handling Decision Table
+
+| Situation | Use This |
+|-----------|----------|
+| Handle one specific error | `Effect.catchTag('ErrorTag', ...)` |
+| Handle all errors and transform | `Effect.catchAll((error) => ...)` |
+| Transform error type | `Effect.mapError((error) => ...)` |
+| Convert to defect (infrastructure) | `Effect.orDie` |
+| **Never use** | `Effect.catchAllCause` |
+
+## When to Use Effect.die / Effect.orDie
+
+### Infrastructure Errors Should Be Defects
+
+Infrastructure errors (database connection lost, filesystem errors) are not recoverable by the caller. They should become **defects**.
+
+```typescript
+// findMany - if database fails, that's infrastructure
+const findAll: () => Effect.Effect<ReadonlyArray<EntityModel>, never, never> =
+  Effect.fn('Repository.findAll')(function* () {
+    return yield* prisma.use((c) => c.entity.findMany()).pipe(
+      Effect.orDie  // Infrastructure errors become defects
+    );
+  });
+
+// Notice: error type is `never` - no recoverable errors
+```
+
+### When to Convert to Defects
+
+| Scenario | Error Type | Action |
+|----------|------------|--------|
+| Database connection lost | Infrastructure | `Effect.orDie` |
+| File system error | Infrastructure | `Effect.orDie` |
+| Network timeout (internal) | Infrastructure | `Effect.orDie` |
+| Entity not found | Domain | Keep as typed error |
+| Validation failed | Domain | Keep as typed error |
+| User not authorized | Domain | Keep as typed error |
+
+## Requirements Checklist
+
+- [ ] **Domain errors in packages/domain** - `[entity]-errors.ts`
+{{#if isMonorepoLayout}}
+- [ ] **Prisma errors in packages/persistence** - `src/service/prisma-errors.ts`
+{{else}}
+- [ ] **Prisma errors in web app** - `app/lib/prisma/prisma-errors.ts`
+{{/if}}
+- [ ] **HTTP errors in web app** - `features/[entity]/error/[entity]-http-errors.ts`
+- [ ] Domain errors extend `Schema.TaggedError` with context fields
+- [ ] HTTP errors include `HttpApiSchema.annotations({ status: xxx })`
+- [ ] Prisma errors mapped to domain errors with `handlePrismaError`
+- [ ] Infrastructure errors become defects via `Effect.orDie`
+- [ ] Error mapping in HTTP handlers with `Effect.catchTag`
+- [ ] Consistent naming: `[Entity][Reason]Error` / `[Entity][Reason]HttpError`
+
+## Common Pitfalls
+
+1. **Don't define domain errors in the wrong package** - Domain errors go in `packages/domain`
+2. **Don't catch infrastructure errors** - Let them become defects
+3. **Don't forget HTTP status codes** - Always annotate HTTP errors
+4. **Don't mix error types** - Keep domain errors and HTTP errors separate
+5. **Don't forget to map Prisma errors** - Convert to domain errors
+6. **Don't use generic error messages** - Include context (entityId, field name, etc.)
+7. **Don't use catchAllCause** - It hides bugs
+
+## Related Patterns
+
+- [Repository Pattern](./repository-pattern.md) - Error handling in data access
+- [Schema Pattern](./schema-pattern.md) - Schema.TaggedError definitions
+- [HTTP API Pattern](./http-api-pattern.md) - Error mapping in handlers

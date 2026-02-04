@@ -1,0 +1,221 @@
+# Effect-TS Codebase Guidelines
+
+This file provides guidance to Claude Code when working with this codebase - a full-stack TypeScript application using Effect-TS, React Router, and Prisma.
+
+## Resource Hierarchy
+
+**Always consult in this order:**
+1. **patterns/** - Project-specific patterns and examples (check here FIRST)
+2. **effect-solutions CLI** - Run `effect-solutions show <topic>` for patterns
+3. **.reference/effect/** - Effect source code for real implementations
+4. **This file** - Application-specific patterns and guidelines
+
+**Golden Rule:** Never guess Effect patterns. Check patterns/ → effect-solutions → Search .reference/effect/ → Adapt pattern.
+
+<!-- effect-solutions:start -->
+## Effect Best Practices
+
+**IMPORTANT:** Always consult effect-solutions before writing Effect code.
+
+1. Run `effect-solutions list` to see available guides
+2. Run `effect-solutions show <topic>...` for relevant patterns (supports multiple topics)
+3. Search `.reference/effect/` for real implementations
+
+Topics: quick-start, project-setup, tsconfig, basics, services-and-layers, data-modeling, error-handling, config, testing, cli.
+
+Never guess at Effect patterns - check the guide first.
+<!-- effect-solutions:end -->
+
+## Development Commands
+
+### Package Management
+**Important**: Use {{commands.packageManager}} for package management.
+- `{{commands.packageManager}} install` - Install dependencies
+{{#if isMonorepoLayout}}
+- `{{commands.packageManager}} add <package> -w` - Add dependency to workspace root
+- `{{commands.packageManager}} add <package> --filter <package-name>` - Add to specific package
+{{else}}
+- `{{commands.packageManager}} add <package>` - Add dependency
+{{/if}}
+
+### Web App
+- `{{commands.typecheck}}` - Run TypeScript type checking
+- `{{commands.test}}` - Run tests
+- `{{commands.testWatch}}` - Run tests in watch mode
+
+### Database
+- `{{commands.generate}}` - Generate Prisma Client
+- `{{commands.migrate}}` - Create and apply migration in dev
+
+**CRITICAL DEVELOPMENT RULE**: After EVERY file change, you MUST:
+1. Run `{{commands.typecheck}}` immediately
+2. Fix ALL type errors before proceeding
+3. Do NOT continue development until typecheck passes without errors
+
+This is non-negotiable and applies to every single file modification.
+
+## Critical Rules
+
+**Read [CRITICAL_RULES.md](./patterns/CRITICAL_RULES.md) before writing Effect code.** Quick reference:
+
+| Rule | Bad | Good |
+|------|-----|------|
+| Type safety | `any`, `as T` | `Schema.make()`, `Schema.decodeUnknown()` |
+| Error types | `new Error()` | `Schema.TaggedError` |
+| Error catching | `catchAllCause` | `catchTag`, `catchAll`, `mapError` |
+| Option/Either | `Schema.OptionFromSelf` | `Schema.Option` |
+| Data classes | `Schema.Struct` | `Schema.Class` |
+| Construction | `new Class()` | `Class.make()` |
+
+## Project Architecture
+
+**Technology Stack:**
+- **Runtime**: Node.js
+- **Language**: TypeScript with strict mode
+- **Package Manager**: {{commands.packageManager}}
+- **Frontend**: React + React Router
+- **Backend**: Effect HTTP Api
+- **Database**: Prisma
+- **Effect Ecosystem**: effect, @effect/platform
+
+**Project Structure:**
+{{#if isMonorepoLayout}}
+- `{{webAppPath}}/` - Web application
+  - `app/` - Application code
+    - `features/[feature]/` - Feature modules
+      - `router/` - HTTP API endpoints (schemas + handlers)
+      - `error/` - HTTP errors only (domain errors in packages/domain)
+    - `lib/` - Shared libraries and utilities
+    - `routes/` - React Router routes
+- `packages/domain/` - Domain models, branded IDs, and domain errors
+  - `src/[entity]/` - Per-entity organization
+    - `[entity]-id.ts` - Branded ID types
+    - `[entity]-model.ts` - Domain model Schema classes
+    - `[entity]-errors.ts` - Domain errors (TaggedError)
+- `packages/persistence/` - Data access layer (Prisma repositories)
+  - `prisma/` - Prisma schema and generated client
+  - `src/service/` - PrismaService and error handling
+  - `src/[entity]/` - Repository implementations
+{{else}}
+- `{{webAppPath}}/` - Web application
+  - `app/` - Application code
+    - `features/[feature]/` - Feature modules
+      - `router/` - HTTP API endpoints (schemas + handlers)
+      - `repository/` - Data access (Prisma repositories)
+      - `error/` - HTTP errors only (domain errors in packages/domain)
+    - `lib/` - Shared libraries and utilities
+      - `prisma/` - PrismaService and error handling
+    - `routes/` - React Router routes
+- `packages/domain/` - Domain models, branded IDs, and domain errors
+  - `src/[entity]/` - Per-entity organization
+    - `[entity]-id.ts` - Branded ID types
+    - `[entity]-model.ts` - Domain model Schema classes
+    - `[entity]-errors.ts` - Domain errors (TaggedError)
+{{/if}}
+
+## Pattern Index
+
+**See [patterns/README.md](./patterns/README.md)** for the complete task → pattern mapping.
+
+## Testing
+
+### Testing Framework Selection
+
+**CRITICAL RULE**: Choose the correct testing framework based on what you're testing:
+
+**Use @effect/vitest for Effect code:**
+- **MANDATORY** for modules working with Effect, Stream, Layer, TestClock, etc.
+- Import pattern: `import { assert, describe, it } from "@effect/vitest"`
+- Test pattern: `it.effect("description", () => Effect.gen(function*() { ... }))`
+- **FORBIDDEN**: Never use `expect` from vitest in Effect tests - use `assert` methods
+
+**Use regular vitest for pure TypeScript:**
+- **MANDATORY** for pure functions (Array, String, Number operations, etc.)
+- Import pattern: `import { describe, expect, it } from "vitest"`
+- Test pattern: `it("description", () => { ... })`
+
+## Effect-TS Development Patterns
+
+### Core Principles
+- **Type Safety First**: Never use `any` or type assertions - prefer explicit types
+- **Effect Patterns**: Use Effect's composable abstractions
+- **Early Returns**: Prefer early returns over deep nesting
+- **Validate at Boundaries**: Validate inputs at system boundaries only
+- **Resource Safety**: Use Effect's resource management for automatic cleanup
+- **Clean Code**: No useless comments - code should be self-documenting
+
+### System Boundaries & Validated Data
+
+**CRITICAL**: Validation happens at system boundaries. Once data is validated, it flows through the system as branded types/domain models without re-validation.
+
+**System boundaries** (where validation occurs):
+- HTTP request handlers (path params, query params, payloads)
+- Database reads (repository mappers)
+- External API responses
+- Environment variables / config
+
+**Inside the application** (NO validation needed):
+- Service-to-service calls
+- Repository method arguments
+- Domain model operations
+
+```typescript
+// ❌ BAD - re-validating inside the application
+const updateUser = (id: string) => {
+  const userId = UserId.make(id);  // Unnecessary - should already be branded
+  // ...
+}
+
+// ❌ BAD - casting inside the application
+const userId = rawId as UserId;  // Never use 'as' for branded types
+
+// ✅ GOOD - accept already-validated branded type
+const updateUser = (id: UserId) => {
+  // id is already validated - use directly
+  // ...
+}
+
+// ✅ GOOD - validation at HTTP boundary (automatic via Schema)
+HttpApiEndpoint.patch('update', '/:id')
+  .setPath(Schema.Struct({ id: UserId }))  // Validated here
+  .handle(({ path }) => {
+    // path.id is already UserId - no .make() needed
+    return updateUser(path.id);
+  })
+
+// ✅ GOOD - validation at repository boundary (mapper)
+const toUserModel = (row: PrismaUser): UserModel =>
+  new UserModel({
+    id: UserId.make(row.id),  // Validation at DB boundary
+    // ...
+  });
+```
+
+**Rule of thumb**: If you're calling `BrandedId.make()` or using `as BrandedType` anywhere except mappers or input handlers, something is wrong with the data flow.
+
+### Mandatory Development Workflow
+For every implementation task:
+1. **Check Patterns**: Read [patterns/README.md](./patterns/README.md) to find relevant patterns
+2. **Research**: Read the specific pattern files that apply
+3. **Design**: Consider technical design and architecture decisions based on patterns
+4. **Implement**: Write code following the established patterns exactly
+5. **Type Check**: Run `{{commands.typecheck}}` after EVERY file change
+
+**CRITICAL**: Never write feature code without first consulting patterns/README.md.
+
+### Problem-Solving Strategy
+- **Break Down**: Split complex problems into smaller, manageable parts
+- **Validate Frequently**: Run typecheck after every file modification
+- **Simplest Solution**: Choose the simplest approach that meets requirements
+- **Clarity Over Cleverness**: Prioritize readable, maintainable code
+
+## Common Pitfalls
+
+1. **Don't skip patterns/** - Always check [patterns/README.md](./patterns/README.md) before implementing
+2. **Don't guess Effect APIs** - Run `effect-solutions show <topic>` → Search .reference/effect/
+3. **Don't re-validate inside the app** - `BrandedId.make()` and `as BrandedType` only at system boundaries
+4. **Type domain errors** - Infrastructure errors use `Effect.die`
+5. **Stay in Effect** - Don't mix Promise and Effect
+6. **Use `Effect.acquireRelease` or `Effect.addFinalizer`** - For resource cleanup
+7. **Read tests first** - Best usage examples in .reference/effect/ test files
+8. **Always typecheck after changes** - Run `{{commands.typecheck}}` after every modification

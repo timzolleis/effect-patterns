@@ -1,0 +1,469 @@
+# Testing Pattern
+
+## Overview
+
+Testing Effect code uses `@effect/vitest` for seamless integration with Effect's runtime. This pattern documents how to write integration tests for HTTP API routers.
+
+## Principles
+
+- **Use @effect/vitest** for Effect code, regular vitest for pure TypeScript
+- **Use `assert` methods** - NOT `expect` from vitest
+- **Use real database** - In-Memory Database via `PrismaServiceTest`
+- **Layer-based DI** - Share expensive resources (DB, HTTP server) via `layer()`
+- **Header-based auth** - Configure auth per-test via HTTP headers
+
+## Running Tests
+
+```bash
+# Run all tests
+{{commands.test}}
+
+# Run tests in watch mode
+{{commands.testWatch}}
+
+# Run specific test file
+{{commands.test}} path/to/test.ts
+```
+
+---
+
+## Quick Start: HTTP API Router Test
+
+```typescript
+// @vitest-environment node
+import { HttpApiBuilder, HttpApiClient, HttpClient, HttpClientRequest } from "@effect/platform";
+import { assert, describe, layer } from "@effect/vitest";
+import { Effect, Layer } from "effect";
+
+import { DynamicAuthMiddlewareLive } from "#/__fixtures__/dynamic-auth-fixtures";
+import { createTestUser } from "#/__fixtures__/auth-fixtures";
+import { PrismaServiceTest } from "#/__utils__/database-test-layer";
+import { V1TestApiGroup } from "#/__utils__/test-api-group";
+import { makeTestHttpServerLayer } from "#/__utils__/test-http-server";
+
+import { ApiV1Group } from "~/features/api/api-v1-group";
+import { MyApiGroup } from "~/features/my-feature/router/my-api-group";
+import { MyApiGroupLayer } from "~/features/my-feature/router/my-api-group.server";
+{{#if isMonorepoLayout}}
+import { MyRepository } from "{{persistencePackage}}/my-feature/my-repository";
+{{else}}
+import { MyRepository } from "~/features/my-feature/repository/my-repository.server";
+{{/if}}
+
+// =============================================================================
+// Test Layer Setup
+// =============================================================================
+
+const ApiTestLayer = HttpApiBuilder.api(V1TestApiGroup.add(MyApiGroup)).pipe(
+  Layer.provide(MyApiGroupLayer),
+  Layer.provide(MyRepository.DefaultWithoutDependencies),
+  Layer.provide(DynamicAuthMiddlewareLive),
+);
+
+const SharedTestLayer = makeTestHttpServerLayer(ApiTestLayer).pipe(
+  Layer.provideMerge(PrismaServiceTest),
+);
+
+const makeAuthenticatedClient = (userId: string) =>
+  HttpApiClient.make(ApiV1Group, {
+    transformClient: HttpClient.mapRequest(
+      HttpClientRequest.setHeader("x-test-user-id", userId)
+    ),
+  });
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+layer(SharedTestLayer)("MyApiGroup", (it) => {
+  describe("list endpoint", () => {
+    it.effect("returns empty array for new user", () =>
+      Effect.gen(function* () {
+        yield* createTestUser({ id: "list-user-1" });
+        const client = yield* makeAuthenticatedClient("list-user-1");
+
+        const result = yield* client.myFeature.list();
+
+        assert.isArray(result);
+        assert.strictEqual(result.length, 0);
+      })
+    );
+  });
+});
+```
+
+---
+
+## Test Utilities Reference
+
+### Location: `{{webAppPath}}/test/__utils__/`
+
+| File | Export | Purpose |
+|------|--------|---------|
+| `database-test-layer.ts` | `PrismaServiceTest` | SQLite in-memory database with migrations |
+| `test-http-server.ts` | `makeTestHttpServerLayer` | Wraps API layer with test HTTP server |
+| `test-api-group.ts` | `V1TestApiGroup` | Minimal API group for isolated testing |
+
+### Location: `{{webAppPath}}/test/__fixtures__/`
+
+| File | Export | Purpose |
+|------|--------|---------|
+| `auth-fixtures.ts` | `createTestUser` | Creates user in database |
+| `auth-fixtures.ts` | `createTestSession` | Creates real session (for cookie-based auth tests) |
+| `dynamic-auth-fixtures.ts` | `DynamicAuthMiddlewareLive` | Header-based auth for fast testing |
+
+---
+
+## Test Layer Setup Explained
+
+### 1. Use V1TestApiGroup, NOT ApiV1Group
+
+**CRITICAL**: Never use the real `ApiV1Group` in tests - it includes ALL routes and requires ALL handler layers.
+
+```typescript
+// ❌ BAD: Will break when new routes are added
+const ApiTestLayer = HttpApiBuilder.api(ApiV1Group).pipe(...);
+
+// ✅ GOOD: Isolated to routes under test
+const ApiTestLayer = HttpApiBuilder.api(V1TestApiGroup.add(MyApiGroup)).pipe(...);
+```
+
+### 2. Layer Composition Order
+
+```typescript
+// 1. Create API layer with handler + repository + auth
+const ApiTestLayer = HttpApiBuilder.api(V1TestApiGroup.add(MyApiGroup)).pipe(
+  Layer.provide(MyApiGroupLayer),                    // Handler implementation
+  Layer.provide(MyRepository.DefaultWithoutDependencies),  // Repository (needs Prisma)
+  Layer.provide(DynamicAuthMiddlewareLive),          // Auth middleware
+);
+
+// 2. Wrap with test server, then provide database LAST with provideMerge
+const SharedTestLayer = makeTestHttpServerLayer(ApiTestLayer).pipe(
+  Layer.provideMerge(PrismaServiceTest),  // Database - provideMerge exposes to tests
+);
+```
+
+**Why `provideMerge` for PrismaServiceTest?**
+- `provideMerge` satisfies the requirement AND exposes it to test effects
+- Allows `createTestUser()` and other fixtures to access the database
+- Using `provide` would hide it from tests
+
+### 3. Authenticated Client Helper
+
+```typescript
+const makeAuthenticatedClient = (userId: string) =>
+  HttpApiClient.make(ApiV1Group, {
+    transformClient: HttpClient.mapRequest(
+      HttpClientRequest.setHeader("x-test-user-id", userId)
+    ),
+  });
+```
+
+The `DynamicAuthMiddlewareLive` reads `x-test-user-id` header and creates an authenticated user context. This avoids the overhead of real session creation for most tests.
+
+---
+
+## Creating Feature Fixtures
+
+When testing a new feature, create a fixture file:
+
+**Location**: `{{webAppPath}}/test/__fixtures__/[feature]-fixtures.ts`
+
+```typescript
+import { createId } from "@paralleldrive/cuid2";
+import { MyModel } from "{{domainPackage}}/my-feature";
+{{#if isMonorepoLayout}}
+import { MyRepository } from "{{persistencePackage}}/my-feature/my-repository";
+{{else}}
+import { MyRepository } from "~/features/my-feature/repository/my-repository.server";
+{{/if}}
+import { Effect } from "effect";
+
+export interface CreateTestMyEntityOptions {
+  userId: string;
+  name?: string;
+}
+
+export const createTestMyEntity = (
+  options: CreateTestMyEntityOptions
+): Effect.Effect<MyModel, never, MyRepository> =>
+  Effect.gen(function* () {
+    const repo = yield* MyRepository;
+    return yield* repo
+      .create({
+        userId: options.userId,
+        name: options.name ?? `Test Entity ${createId()}`,
+      })
+      .pipe(Effect.orDie);
+  });
+```
+
+**Usage in tests:**
+```typescript
+it.effect("returns user's entities", () =>
+  Effect.gen(function* () {
+    const user = yield* createTestUser({ id: "test-user-1" });
+    yield* createTestMyEntity({ userId: user.id, name: "My Entity" });
+
+    const client = yield* makeAuthenticatedClient("test-user-1");
+    const result = yield* client.myFeature.list();
+
+    assert.strictEqual(result.length, 1);
+  }).pipe(Effect.provide(MyRepository.DefaultWithoutDependencies))
+);
+```
+
+**Note**: When using fixtures that require repositories, add `.pipe(Effect.provide(MyRepository.DefaultWithoutDependencies))` to the test.
+
+---
+
+## Test File Organization
+
+### When to Split Tests
+
+| Scenario | File Pattern |
+|----------|--------------|
+| CRUD operations | `[feature]-api-group.test.ts` |
+| Authorization/ownership | `[feature]-api-group.permissions.test.ts` |
+
+### Directory Structure
+
+```
+{{webAppPath}}/test/
+├── __fixtures__/
+│   ├── auth-fixtures.ts           # createTestUser, createTestSession
+│   ├── dynamic-auth-fixtures.ts   # DynamicAuthMiddlewareLive
+│   └── [feature]-fixtures.ts      # Feature-specific fixtures
+├── __utils__/
+│   ├── database-test-layer.ts     # PrismaServiceTest
+│   ├── test-http-server.ts        # makeTestHttpServerLayer
+│   └── test-api-group.ts          # V1TestApiGroup
+└── features/
+    └── [feature]/
+        ├── [feature]-api-group.test.ts
+        └── [feature]-api-group.permissions.test.ts
+```
+
+---
+
+## Testing Patterns
+
+### Testing Success Cases
+
+```typescript
+it.effect("creates entity successfully", () =>
+  Effect.gen(function* () {
+    yield* createTestUser({ id: "create-user-1" });
+    const client = yield* makeAuthenticatedClient("create-user-1");
+
+    const result = yield* client.myFeature.create({
+      payload: { name: "New Entity" },
+    });
+
+    assert.strictEqual(result.name, "New Entity");
+    assert.isDefined(result.id);
+    assert.instanceOf(result.createdAt, Date);
+  })
+);
+```
+
+### Testing Error Cases
+
+Use `Effect.flip` to convert success/error channels for assertion:
+
+```typescript
+it.effect("returns NotFoundHttpError for non-existent entity", () =>
+  Effect.gen(function* () {
+    yield* createTestUser({ id: "notfound-user-1" });
+    const client = yield* makeAuthenticatedClient("notfound-user-1");
+
+    const error = yield* Effect.flip(
+      client.myFeature.get({ path: { id: "non-existent-id" as EntityId } })
+    );
+
+    assert.strictEqual(error._tag, "EntityNotFoundHttpError");
+  })
+);
+```
+
+### Testing Ownership/Authorization
+
+```typescript
+it.effect("returns ForbiddenError when accessing another user's resource", () =>
+  Effect.gen(function* () {
+    const user1 = yield* createTestUser({ id: "owner-user" });
+    yield* createTestUser({ id: "attacker-user" });
+
+    const entity = yield* createTestMyEntity({ userId: user1.id });
+
+    const client = yield* makeAuthenticatedClient("attacker-user");
+
+    const error = yield* Effect.flip(
+      client.myFeature.update({
+        path: { id: entity.id },
+        payload: { name: "Malicious Update" },
+      })
+    );
+
+    assert.strictEqual(error._tag, "ForbiddenError");
+  }).pipe(Effect.provide(MyRepository.DefaultWithoutDependencies))
+);
+```
+
+### Testing Data Isolation
+
+Verify users only see their own data:
+
+```typescript
+it.effect("does NOT return other users' entities", () =>
+  Effect.gen(function* () {
+    const user1 = yield* createTestUser({ id: "isolation-user-1" });
+    const user2 = yield* createTestUser({ id: "isolation-user-2" });
+
+    yield* createTestMyEntity({ userId: user1.id, name: "User1 Entity" });
+    yield* createTestMyEntity({ userId: user2.id, name: "User2 Entity" });
+
+    const client = yield* makeAuthenticatedClient("isolation-user-1");
+    const result = yield* client.myFeature.list();
+
+    assert.strictEqual(result.length, 1);
+    assert.strictEqual(result[0].name, "User1 Entity");
+  }).pipe(Effect.provide(MyRepository.DefaultWithoutDependencies))
+);
+```
+
+---
+
+## Critical Rules
+
+1. **ONE `layer()` per file** - Use `describe` blocks for grouping, not multiple `layer()` calls
+2. **Unique IDs per test** - Tests share the database; use prefixed IDs like `"list-user-1"`, `"create-user-2"`
+3. **Create dependencies first** - Call `createTestUser()` before creating entities with foreign keys
+4. **Match user IDs** - The ID in `createTestUser({ id })` must match `makeAuthenticatedClient(id)`
+5. **Provide repository for fixtures** - Add `.pipe(Effect.provide(Repository.DefaultWithoutDependencies))` when using `createTestEntity` fixtures
+
+---
+
+## Available Assert Methods
+
+```typescript
+// Strict equality (===)
+assert.strictEqual(actual, expected);
+
+// Deep equality
+assert.deepStrictEqual(obj1, obj2);
+
+// Boolean assertions
+assert.isTrue(condition);
+assert.isFalse(condition);
+
+// Type checks
+assert.isNull(value);
+assert.isUndefined(value);
+assert.isDefined(value);
+assert.isArray(value);
+assert.instanceOf(error, Date);
+
+// String/Array contains
+assert.include(stringOrArray, element);
+```
+
+**NEVER use `expect` from vitest** - always use `assert` from `@effect/vitest`.
+
+---
+
+{{#if isMonorepoLayout}}
+## Repository Tests (packages/persistence)
+
+Repository tests live in the persistence package and test database operations directly.
+
+### Location & Utilities
+
+```
+packages/persistence/
+├── testing/
+│   ├── index.ts                    # Exports PrismaServiceTest
+│   └── __fixtures__/
+│       └── user-fixture.ts         # createTestUser
+└── test/
+    └── [feature]/
+        └── [feature]-repository.test.ts
+```
+
+### Quick Start: Repository Test
+
+```typescript
+import { assert, describe, layer } from "@effect/vitest";
+import { Effect, Layer } from "effect";
+import { OrganizationSlug } from "{{domainPackage}}/organization/organization-slug";
+import { OrganizationRepository } from "../../src/organization/organization-repository";
+import { PrismaServiceTest } from "../../testing";
+
+const SharedTestLayer = OrganizationRepository.DefaultWithoutDependencies.pipe(
+  Layer.provideMerge(PrismaServiceTest)
+);
+
+layer(SharedTestLayer)("OrganizationRepository", (it) => {
+  describe("create", () => {
+    it.effect("creates organization successfully", () =>
+      Effect.gen(function* () {
+        const repo = yield* OrganizationRepository;
+
+        const org = yield* repo.create({
+          name: "Test Org",
+          slug: OrganizationSlug.make("test-org"),
+          keycloakGroupId: null,
+        });
+
+        assert.strictEqual(org.name, "Test Org");
+        assert.strictEqual(org.slug, "test-org");
+      })
+    );
+
+    it.effect("returns OrganizationSlugExistsError for duplicate slug", () =>
+      Effect.gen(function* () {
+        const repo = yield* OrganizationRepository;
+
+        yield* repo.create({
+          name: "First Org",
+          slug: OrganizationSlug.make("duplicate-slug"),
+          keycloakGroupId: null,
+        });
+
+        const error = yield* Effect.flip(
+          repo.create({
+            name: "Second Org",
+            slug: OrganizationSlug.make("duplicate-slug"),
+            keycloakGroupId: null,
+          })
+        );
+
+        assert.strictEqual(error._tag, "OrganizationSlugExistsError");
+      })
+    );
+  });
+});
+```
+
+### Key Differences from HTTP API Tests
+
+| Aspect | HTTP API Tests | Repository Tests |
+|--------|----------------|------------------|
+| Location | `{{webAppPath}}/test/` | `packages/persistence/test/` |
+| Import PrismaServiceTest | `#/__utils__/database-test-layer` | `../../testing` |
+| Layer setup | `makeTestHttpServerLayer(...)` | `Repository.DefaultWithoutDependencies` |
+| Auth | Header-based via client | Not needed |
+
+---
+{{/if}}
+
+## Complete Examples
+
+| Type | Location |
+|------|----------|
+| HTTP API CRUD | `{{webAppPath}}/test/features/linked-account/linked-account-api-group.test.ts` |
+| HTTP API Permissions | `{{webAppPath}}/test/features/linked-account/linked-account-api-group.permissions.test.ts` |
+{{#if isMonorepoLayout}}
+| Repository | `packages/persistence/test/linked-account/linked-account-repository.test.ts` |
+{{/if}}

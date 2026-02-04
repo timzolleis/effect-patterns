@@ -1,0 +1,15 @@
+{
+  "name": "effect-patterns",
+  "version": "1.0.0",
+  "description": "Central repository for Effect-TS patterns and Claude Code skills",
+  "scripts": {
+    "skills:install": "./scripts/install-skills.sh",
+    "patterns:sync": "./scripts/sync-patterns.sh"
+  },
+  "keywords": ["effect-ts", "patterns", "claude-code"],
+  "license": "MIT",
+  "packageManager": "pnpm@10.28.2",
+  "dependencies": {
+    "handlebars": "^4.7.8"
+  }
+}

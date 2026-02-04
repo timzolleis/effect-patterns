@@ -1,0 +1,25 @@
+{
+  "source": "github:timzolleis/effect-patterns",
+  "ref": "main",
+  "variants": {
+    "dataFetching": "effect-atom"
+  },
+  "variables": {
+    "domainPackage": "@your-org/domain",
+    "persistencePackage": "@your-org/persistence",
+    "webAppPath": "apps/web",
+    "webFeaturesPath": "apps/web/app/features",
+
+    "_comment_layout": "Repository layout: true = packages/persistence, false = features/[domain]/repository/",
+    "isMonorepoLayout": true,
+
+    "commands": {
+      "packageManager": "pnpm",
+      "typecheck": "pnpm web typecheck",
+      "test": "pnpm web test",
+      "testWatch": "pnpm web test --watch",
+      "migrate": "pnpm web prisma migrate dev",
+      "generate": "pnpm web prisma generate"
+    }
+  }
+}

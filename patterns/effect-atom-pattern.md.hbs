@@ -1,0 +1,226 @@
+# Effect Atom Pattern
+
+React data fetching and mutations using `@effect-atom/atom-react` with the Effect HTTP API.
+
+---
+
+## 1. Atoms File Structure
+
+**Define atoms in a dedicated file per feature, not inline in components.**
+
+**Location:** `{{webFeaturesPath}}/[feature]/atoms/[feature]-atoms.ts`
+
+```typescript
+import * as Duration from 'effect/Duration';
+import { AtomV2ApiClient } from '~/features/api/client/api-client';
+
+// Reactivity key constant - use in both queries AND mutations
+export const EntityReactivityKeys = ['entities'] as const;
+
+// Query atom
+export const entitiesAtom = AtomV2ApiClient.query('entity', 'list', {
+  timeToLive: Duration.minutes(5),
+  reactivityKeys: EntityReactivityKeys,
+});
+
+// Mutation atoms
+export const createEntityMutation = AtomV2ApiClient.mutation('entity', 'create');
+export const updateEntityMutation = AtomV2ApiClient.mutation('entity', 'update');
+export const deleteEntityMutation = AtomV2ApiClient.mutation('entity', 'delete');
+```
+
+**For parameterized queries, use `Atom.family`:**
+
+```typescript
+import { Atom } from "@effect-atom/atom-react";
+
+export const entityByIdFamily = Atom.family((id: string) =>
+  AtomV2ApiClient.query('entity', 'get', {
+    path: { id },
+    timeToLive: Duration.minutes(5),
+    reactivityKeys: [...EntityReactivityKeys, id],
+  })
+);
+```
+
+---
+
+## 2. Query Usage
+
+```typescript
+import { Result, useAtomValue } from '@effect-atom/atom-react';
+import { entitiesAtom, entityByIdFamily } from '~/features/entity/atoms/entity-atoms';
+
+// List query
+function EntityList() {
+  const result = useAtomValue(entitiesAtom);
+
+  return Result.builder(result)
+    .onSuccess((entities) => <List items={entities} />)
+    .onErrorTag('ForbiddenError', () => <Unauthorized />)
+    .onFailure(() => <GenericError />)
+    .render();
+}
+
+// Parameterized query
+function EntityDetails({ id }: { id: string }) {
+  const result = useAtomValue(entityByIdFamily(id));
+  // ...
+}
+```
+
+**Combine multiple queries with `Result.all`:**
+
+```typescript
+const allResults = Result.all([result1, result2]);
+return Result.builder(allResults)
+  .onSuccess(([data1, data2]) => <Component data1={data1} data2={data2} />)
+  .render();
+```
+
+---
+
+## 3. Mutation Patterns
+
+### Pattern 1: Fire-and-Forget (Default)
+
+```typescript
+import { useAtom, Result } from '@effect-atom/atom-react';
+import { createEntityMutation, EntityReactivityKeys } from '~/features/entity/atoms/entity-atoms';
+
+function CreateForm() {
+  const [result, runMutation] = useAtom(createEntityMutation);
+
+  const handleSubmit = (data: CreateEntityInput) => {
+    runMutation({ payload: data, reactivityKeys: EntityReactivityKeys });
+  };
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <Button disabled={Result.isWaiting(result)}>Create</Button>
+    </form>
+  );
+}
+```
+
+### Pattern 2: React to Success (Modal Close, Toast)
+
+```typescript
+import { useAtom, Result } from '@effect-atom/atom-react';
+import { useRef, useEffect } from 'react';
+
+function CreateModal({ onClose }: { onClose: () => void }) {
+  const [result, runMutation] = useAtom(createEntityMutation);
+  const prevWaiting = useRef(false);
+
+  useEffect(() => {
+    const wasWaiting = prevWaiting.current;
+    const isNowSuccess = Result.isSuccess(result) && !Result.isWaiting(result);
+    prevWaiting.current = Result.isWaiting(result);
+
+    if (wasWaiting && isNowSuccess) {
+      onClose();
+    }
+  }, [result, onClose]);
+
+  const handleSubmit = (data) => {
+    runMutation({ payload: data, reactivityKeys: EntityReactivityKeys });
+  };
+  // ...
+}
+```
+
+### Pattern 3: Await Result (Navigation)
+
+```typescript
+import { useAtomSet } from '@effect-atom/atom-react';
+import { Exit, Match } from 'effect';
+
+function CreateForm() {
+  const navigate = useNavigate();
+  const runMutation = useAtomSet(createEntityMutation, { mode: 'promiseExit' });
+
+  const handleSubmit = async (data) => {
+    const result = await runMutation({ payload: data, reactivityKeys: EntityReactivityKeys });
+
+    Exit.match(result, {
+      onSuccess: (entity) => navigate(`/entities/${entity.id}`),
+      onFailure: (cause) => toast.error(matchErrorMessage(cause)),
+    });
+  };
+}
+```
+
+| Pattern | Use When |
+|---------|----------|
+| Fire-and-forget | Default - query refresh via reactivityKeys is sufficient |
+| React to success | Close modal, show toast after success |
+| Await/promise | Navigate to created resource, sequential operations |
+
+---
+
+## 4. Result State Handling
+
+```typescript
+// Method reference
+Result.isInitial(r)  // No data yet
+Result.isWaiting(r)  // Loading (initial or refresh)
+Result.isSuccess(r)  // Has data
+Result.isFailure(r)  // Error occurred
+Result.value(r)      // Option<A> - value if available
+```
+
+**Always use `Result.builder` with `.render()`:**
+
+```typescript
+return Result.builder(result)
+  .onErrorTag('NotFoundHttpError', () => <NotFound />)
+  .onSuccess((data) => <Component data={data} />)
+  .onFailure(() => <GenericError />)
+  .render();
+```
+
+---
+
+## 5. Anti-Patterns
+
+| Don't | Do Instead |
+|-------|------------|
+| `window.location.reload()` | Use `reactivityKeys` for auto-refresh |
+| `useState` for isLoading/error | Use `Result.isWaiting()`, `Result.isFailure()` |
+| Create atoms inline in components | Import from atoms file |
+| `refreshKey` state pattern | Use `useAtomRefresh(atom)` |
+| Missing `reactivityKeys` on mutations | Always pass `reactivityKeys` |
+
+---
+
+## 6. Advanced
+
+### Manual Refresh
+
+```typescript
+const refreshData = useAtomRefresh(dataAtom);
+<Button onClick={refreshData}>Refresh</Button>
+```
+
+### Derived State
+
+```typescript
+// In atoms file
+export const filteredEntriesAtom = Atom.readable((get) => {
+  const result = get(entriesAtom);
+  const filter = get(filterAtom);
+  if (!Result.isSuccess(result) || !filter) return result;
+  return Result.map(result, (entries) => entries.filter((e) => e.status === filter));
+});
+```
+---
+
+## Checklist
+
+- [ ] Atoms defined in `features/[feature]/atoms/[feature]-atoms.ts`
+- [ ] `ReactivityKeys` constant exported and used in queries + mutations
+- [ ] `Atom.family` for parameterized queries
+- [ ] `Result.builder(...).render()` for all Result rendering
+- [ ] No atoms created inline in components
+- [ ] No manual `useState` for loading/error state
