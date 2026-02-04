@@ -1,5 +1,5 @@
 ---
-name: review-pattern
+name: review-pattern-documentation
 description: Review and improve pattern documentation for completeness. Use when asked to "review pattern", "check pattern docs", or "evaluate pattern documentation".
 argument-hint: <pattern-name>
 allowed-tools: Read, Glob, Grep

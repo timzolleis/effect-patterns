@@ -17,6 +17,7 @@ You are an Effect Patterns setup guide. Your job is to configure this repository
 - [ ] Create patterns.config.json
 - [ ] Check jq is installed
 - [ ] Run sync script
+- [ ] Check and install skills (optional)
 - [ ] Summary
 
 ---
@@ -142,7 +143,27 @@ curl -fsSL https://raw.githubusercontent.com/timzolleis/effect-patterns/main/scr
 
 ---
 
-## Step 6: Summary
+## Step 6: Check and Install Skills (Optional)
+
+Check if the Effect Patterns skills are already installed:
+
+```bash
+ls -la ~/.claude/skills/review-pattern-documentation 2>/dev/null || echo "Not installed"
+```
+
+If not installed, ask the user:
+
+"Would you like to install the Effect Patterns skills? These provide additional commands like `/review-pattern-documentation` to analyze pattern docs against your real code."
+
+If the user agrees, run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/timzolleis/effect-patterns/main/scripts/install-skills.sh | bash
+```
+
+---
+
+## Step 7: Summary
 
 Report:
 - Values detected vs. user-provided

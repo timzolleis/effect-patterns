@@ -116,8 +116,15 @@ pattern_count=0
 for file in "$TEMP_DIR"/patterns/*.hbs; do
   [ -f "$file" ] || continue
   name=$(basename "$file" .hbs)
-  echo "  - $name"
-  process_template "$file" "$PATTERNS_DIR/$name"
+
+  # CLAUDE.md goes to repo root, not patterns directory
+  if [ "$name" = "CLAUDE.md" ]; then
+    echo "  - $name (-> repo root)"
+    process_template "$file" "$name"
+  else
+    echo "  - $name"
+    process_template "$file" "$PATTERNS_DIR/$name"
+  fi
   ((pattern_count++))
 done
 

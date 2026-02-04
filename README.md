@@ -103,11 +103,16 @@ The `patterns.config.json` file tells the sync script how to customize patterns 
 
 ### Patterns
 
-After syncing, your `patterns/` directory will contain:
+After syncing, you'll get:
 
+**Repo root:**
 | File | Description |
 |------|-------------|
 | `CLAUDE.md` | Claude Code guidelines (main entry point) |
+
+**`patterns/` directory:**
+| File | Description |
+|------|-------------|
 | `CRITICAL_RULES.md` | Must-follow rules for Effect code |
 | `README.md` | Pattern index and quick reference |
 | `repository-pattern.md` | Data access layer with Prisma + Effect.Service |
